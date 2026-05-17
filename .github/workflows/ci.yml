@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[all]"
+
+      - name: Compile sources
+        run: python -m compileall -q src tests
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Check repository neutrality
+        env:
+          BINARY_COMP_FORBIDDEN_TERMS: ${{ vars.BINARY_COMP_FORBIDDEN_TERMS }}
+        run: python scripts/check_neutrality.py
