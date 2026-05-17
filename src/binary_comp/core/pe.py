@@ -76,18 +76,29 @@ class PEImage:
         return section.end if section else None
 
     def read(self, va: int, size: int) -> bytes | None:
-        section = self.section_for_va(va)
-        if section is None:
-            return None
+        result = bytearray()
+        cursor = va
+        remaining = size
 
-        offset = va - section.start
-        if offset >= section.rawsize:
-            return b"\0" * size
+        while remaining > 0:
+            section = self.section_for_va(cursor)
+            if section is None:
+                return None
 
-        available = min(size, section.rawsize - offset)
-        result = bytearray(size)
-        raw_offset = section.rawptr + offset
-        result[:available] = self.data[raw_offset:raw_offset + available]
+            offset = cursor - section.start
+            chunk_size = min(remaining, section.end - cursor)
+            if offset >= section.rawsize:
+                result.extend(b"\0" * chunk_size)
+            else:
+                available = min(chunk_size, section.rawsize - offset)
+                raw_offset = section.rawptr + offset
+                result.extend(self.data[raw_offset:raw_offset + available])
+                if available < chunk_size:
+                    result.extend(b"\0" * (chunk_size - available))
+
+            cursor += chunk_size
+            remaining -= chunk_size
+
         return bytes(result)
 
     def c_string_at(
@@ -104,7 +115,7 @@ class PEImage:
         if section.flags and not (section.flags & READABLE_FLAG):
             return None
 
-        data = self.read(va, max_len)
+        data = self.read(va, min(max_len, section.end - va))
         if not data:
             return None
         if not (32 <= data[0] <= 126):

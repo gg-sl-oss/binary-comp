@@ -41,6 +41,9 @@ def test_load_minimal_project_config(fixture_root):
     assert target.map_path == str(fixture_root / "rebuilt.map")
     assert target.source_dirs == (str(fixture_root / "src"),)
     assert target.globals_source == str(fixture_root / "src" / "globals.cpp")
+    assert target.globals_header == str(fixture_root / "src" / "globals.h")
+    assert target.code_globals_header == str(fixture_root / "code" / "globals.h")
+    assert target.auto_complete == str(fixture_root / "src" / "auto_complete.txt")
 
 
 def test_value_checker_on_generated_fixture_project(fixture_root, sample_binaries):

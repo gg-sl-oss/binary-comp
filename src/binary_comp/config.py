@@ -37,6 +37,9 @@ class ProjectTarget:
     map_path: str
     source_dirs: tuple[str, ...]
     globals_source: str | None = None
+    globals_header: str | None = None
+    code_globals_header: str | None = None
+    auto_complete: str | None = None
     code_dir: str | None = None
     map_skip: str | None = None
     build: BuildConfig = BuildConfig()
@@ -163,6 +166,9 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
         map_path=_resolve_standalone_path(require_string(target_cfg, "map", f"targets.{target}.map"), base) or "",
         source_dirs=_resolve_standalone_paths(source_dirs, base),
         globals_source=_resolve_standalone_path(optional_string(target_cfg, "globals_source"), base),
+        globals_header=_resolve_standalone_path(optional_string(target_cfg, "globals_header"), base),
+        code_globals_header=_resolve_standalone_path(optional_string(target_cfg, "code_globals_header"), base),
+        auto_complete=_resolve_standalone_path(optional_string(target_cfg, "auto_complete"), base),
         code_dir=_resolve_standalone_path(
             optional_string(target_cfg, "code_export_dir") or optional_string(target_cfg, "code_dir"),
             base,
@@ -207,6 +213,9 @@ def _target_from_legacy(config: dict[str, Any], target: str) -> ProjectTarget:
         map_path=require_string(value_target, "map", f"values_capstone.{target}.map"),
         source_dirs=(source_dir,),
         globals_source=optional_string(path_cfg, "globals_source"),
+        globals_header=optional_string(path_cfg, "globals_header"),
+        code_globals_header=optional_string(path_cfg, "code_globals_header"),
+        auto_complete=optional_string(path_cfg, "auto_complete"),
         code_dir=optional_string(path_cfg, "code_dir"),
         map_skip=optional_string(path_cfg, "map_skip"),
         build=BuildConfig(

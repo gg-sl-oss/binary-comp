@@ -5,11 +5,12 @@ projects.
 
 The package is being extracted from project-specific scripts into reusable
 library modules plus a CLI. The current analyzers cover Capstone-backed operand
-value checks and global data comparison:
+value checks, global data comparison, and global declaration audits:
 
 ```bash
 binary-comp values --config path/to/binary-comp.json --target full
 binary-comp data --config path/to/binary-comp.json --target full
+binary-comp globals --config path/to/binary-comp.json --target full
 ```
 
 ## Design principles
@@ -22,10 +23,16 @@ required.
 ## Minimal configuration
 
 The value checker needs only a target description: original binary, rebuilt
-binary, linker map, and source directory. The data checker additionally needs a
-globals source file with original addresses encoded in symbol names or comments.
-Function boundaries from a Ghidra export directory are optional hints; operands
-are always decoded from the binaries with Capstone.
+binary, linker map, and source directory. The data checker and globals audit
+also need a globals source file with original addresses encoded in symbol names
+or comments.
+
+The globals audit can use optional `globals_header`, `code_globals_header`, and
+`auto_complete` paths for broader coverage. Analyzer policy such as custom type
+sizes and reviewed auto-complete effects lives in top-level config sections when
+needed; absent optional sections are treated as empty. Function boundaries from a
+Ghidra export directory are optional hints; operands are always decoded from the
+binaries with Capstone.
 
 ```json
 {
