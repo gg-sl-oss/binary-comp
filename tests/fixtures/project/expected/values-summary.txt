@@ -1,0 +1,6 @@
+--- Summary ---
+Functions checked: 1
+With value mismatches: 0
+Total mismatches: 0
+Skipped (no bytes/disassembly): 0
+Skipped (similarity < 90.0%): 0

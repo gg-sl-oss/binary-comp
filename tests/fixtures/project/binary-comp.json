@@ -1,0 +1,11 @@
+{
+  "targets": {
+    "full": {
+      "original_exe": "original.exe",
+      "rebuilt_exe": "rebuilt.exe",
+      "map": "rebuilt.map",
+      "source_dirs": ["src"],
+      "code_export_dir": "code"
+    }
+  }
+}

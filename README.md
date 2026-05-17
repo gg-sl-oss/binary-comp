@@ -54,3 +54,9 @@ Or install it editable with the optional analyzer dependencies:
 python3 -m pip install -e ".[all]"
 binary-comp values --help
 ```
+
+Run the test suite with:
+
+```bash
+python3 -m pytest
+```

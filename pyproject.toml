@@ -17,10 +17,14 @@ dependencies = []
 [project.optional-dependencies]
 capstone = ["capstone>=5"]
 cpp = ["tree-sitter>=0.20", "tree-sitter-cpp>=0.20"]
-all = ["capstone>=5", "tree-sitter>=0.20", "tree-sitter-cpp>=0.20"]
+test = ["pytest>=8"]
+all = ["capstone>=5", "tree-sitter>=0.20", "tree-sitter-cpp>=0.20", "pytest>=8"]
 
 [project.scripts]
 binary-comp = "binary_comp.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/binary_comp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

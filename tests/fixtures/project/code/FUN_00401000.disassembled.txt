@@ -1,0 +1,6 @@
+Function: FUN_00401000
+Address: 0x00401000
+
+MOV EAX,0x7
+CMP EAX,0x7
+RET

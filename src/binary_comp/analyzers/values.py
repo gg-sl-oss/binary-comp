@@ -919,8 +919,9 @@ def format_summary(summary: ValuesSummary, min_similarity: float = 0.0) -> str:
         for warning in result.warnings:
             lines.append(format_warning(warning))
 
+    if lines:
+        lines.append("")
     lines.extend([
-        "",
         "--- Summary ---",
         f"Functions checked: {summary.functions_checked}",
         f"With value mismatches: {summary.with_value_mismatches}",
