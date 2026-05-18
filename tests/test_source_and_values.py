@@ -3,10 +3,19 @@ from __future__ import annotations
 import pytest
 
 from binary_comp.analyzers.calls import normalize_compiled
-from binary_comp.analyzers.values import ValuesOptions, check_values, format_summary, load_policy
+from binary_comp.analyzers.values import (
+    CheckResult,
+    ValuesOptions,
+    ValuesSummary,
+    check_values,
+    format_summary,
+    load_policy,
+    same_effective_lea_displacement,
+)
 from binary_comp.config import BuildConfig, ProjectTarget, load_project_target
+from binary_comp.core.disasm import Instruction, Operand
 from binary_comp.source.cpp import parse_source_function_groups
-from binary_comp.source.functions import load_source_groups, map_source_groups
+from binary_comp.source.functions import FunctionGroup, load_source_groups, map_source_groups
 
 
 pytest.importorskip("tree_sitter")
@@ -123,3 +132,94 @@ def test_value_checker_on_generated_fixture_project(fixture_root, sample_binarie
     assert summary.total_mismatches == 0
     expected = (fixture_root / "expected" / "values-summary.txt").read_text(encoding="utf-8").rstrip("\n")
     assert format_summary(summary, min_similarity=90.0) == expected
+
+
+def test_value_summary_includes_mismatch_breakdown():
+    instr = Instruction(0x401000, "push", "1", (), "push 1")
+    group_a = FunctionGroup("a.cpp", "A::Run", 1, (0x401000,), 0x501000, "?Run@A@@QAEXXZ")
+    group_b = FunctionGroup("b.cpp", "B::Run", 1, (0x402000,), 0x502000, "?Run@B@@QAEXXZ")
+    result_a = CheckResult(
+        original_addr=0x401000,
+        rebuilt_addr=0x501000,
+        similarity=91.5,
+        original_count=4,
+        rebuilt_count=4,
+        warnings=(
+            ("imm", 1, 2, instr, instr),
+            ("string", "left", "right", instr, instr),
+        ),
+    )
+    result_b = CheckResult(
+        original_addr=0x402000,
+        rebuilt_addr=0x502000,
+        similarity=95.0,
+        original_count=4,
+        rebuilt_count=4,
+        warnings=(("offset", 0x10, 0x20, instr, instr),),
+    )
+    summary = ValuesSummary(
+        functions_checked=2,
+        with_value_mismatches=2,
+        total_mismatches=3,
+        skipped_no_bytes=0,
+        skipped_below_threshold=0,
+        unmapped_source_groups=0,
+        boundary_inventory={},
+        reports=((group_a, result_a), (group_b, result_b)),
+    )
+
+    text = format_summary(summary)
+
+    assert "--- Mismatch Breakdown ---" in text
+    assert "By kind: IMM 1, STRING 1, OFFSET 1" in text
+    assert "  A::Run: 2 (IMM 1, STRING 1; 91.5%)" in text
+    assert "  B::Run: 1 (OFFSET 1; 95.0%)" in text
+
+
+def test_value_offsets_compare_effective_alias_after_pointer_increment():
+    policy = load_policy()
+    compiled = [
+        Instruction(0x1000, "lea", "edx, [ecx + 1]", (
+            Operand("reg", "edx", reg="edx"),
+            Operand("mem", "", base="ecx", scale=1, disp=1),
+        ), "lea edx, [ecx + 1]"),
+        Instruction(0x1004, "mov", "bl, byte ptr [edx + 3]", (
+            Operand("reg", "bl", reg="bl"),
+            Operand("mem", "", base="edx", scale=1, disp=3),
+        ), "mov bl, byte ptr [edx + 3]"),
+        Instruction(0x1008, "add", "edx, 4", (
+            Operand("reg", "edx", reg="edx"),
+            Operand("imm", "4", imm=4),
+        ), "add edx, 4"),
+        Instruction(0x100C, "mov", "bl, byte ptr [edx + 1]", (
+            Operand("reg", "bl", reg="bl"),
+            Operand("mem", "", base="edx", scale=1, disp=1),
+        ), "mov bl, byte ptr [edx + 1]"),
+    ]
+    original = [
+        Instruction(0x2000, "lea", "edx, [ecx + 5]", (
+            Operand("reg", "edx", reg="edx"),
+            Operand("mem", "", base="ecx", scale=1, disp=5),
+        ), "lea edx, [ecx + 5]"),
+        Instruction(0x2004, "mov", "bl, byte ptr [edx - 1]", (
+            Operand("reg", "bl", reg="bl"),
+            Operand("mem", "", base="edx", scale=1, disp=-1),
+        ), "mov bl, byte ptr [edx - 1]"),
+        Instruction(0x2008, "add", "edx, 4", (
+            Operand("reg", "edx", reg="edx"),
+            Operand("imm", "4", imm=4),
+        ), "add edx, 4"),
+        Instruction(0x200C, "mov", "bl, byte ptr [edx - 3]", (
+            Operand("reg", "bl", reg="bl"),
+            Operand("mem", "", base="edx", scale=1, disp=-3),
+        ), "mov bl, byte ptr [edx - 3]"),
+    ]
+
+    assert same_effective_lea_displacement(
+        compiled, original, 1, 1,
+        compiled[1].operands[1], original[1].operands[1], policy,
+    )
+    assert same_effective_lea_displacement(
+        compiled, original, 3, 3,
+        compiled[3].operands[1], original[3].operands[1], policy,
+    )

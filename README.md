@@ -40,6 +40,16 @@ top-level config sections when needed; absent optional sections are treated as
 empty. Function boundaries from a Ghidra export directory are hints only;
 operands and vtable writes are decoded from the binaries with Capstone.
 
+The value checker prints a mismatch breakdown by operand kind and highlights
+the functions with the most mismatches. It also normalizes equivalent pointer
+aliases where compiler scheduling changes a temporary register but the final
+effective address is the same.
+
+The vtable checker separates invalid parent references from parent classes
+that exist in source but do not yet have vtable metadata. When possible, it
+reports candidate parent vtables discovered from constructor vptr writes so the
+source annotations or config can be completed without guessing.
+
 ```json
 {
   "targets": {

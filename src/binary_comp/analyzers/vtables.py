@@ -62,6 +62,26 @@ class ConstructorEvidence:
 
 
 @dataclass(frozen=True)
+class VtableWriteEvidence:
+    vtable_addr: int
+    function_addr: int
+    instruction_addr: int
+    register: str
+    symbols: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ParentVtableCandidate:
+    class_name: str
+    parent: str
+    vtable_addr: int
+    entries_count: int
+    expected_count: int
+    purecall_count: int
+    writes: tuple[VtableWriteEvidence, ...]
+
+
+@dataclass(frozen=True)
 class ClassReport:
     name: str
     vtable_addr: int
@@ -89,6 +109,8 @@ class VtableSummary:
     vtable_addresses: tuple[int, ...]
     classes: dict[str, dict[str, Any]]
     invalid_parents: tuple[tuple[str, str], ...]
+    parents_without_vtable_info: tuple[tuple[str, str], ...]
+    parent_vtable_candidates: tuple[ParentVtableCandidate, ...]
     constructor_parent_warnings: tuple[dict[str, Any], ...]
     constructor_parent_stats: dict[str, int]
     implementations_count: int
@@ -319,12 +341,35 @@ def line_context(source: bytes, node) -> str:
 
 
 def text_before_node_comments(source: bytes, tree, node, max_bytes: int = 1500) -> str:
-    min_start = max(0, node.start_byte - max_bytes)
     comments = []
-    for candidate in walk(tree.root_node):
-        if candidate.type == "comment" and min_start <= candidate.start_byte < node.start_byte:
-            comments.append(node_text(source, candidate))
+    min_start = max(0, node.start_byte - max_bytes)
+    cursor = node.start_byte
+    while cursor > min_start:
+        while cursor > min_start and chr(source[cursor - 1]).isspace():
+            cursor -= 1
+        if source[max(min_start, cursor - 2):cursor] == b"*/":
+            start = source.rfind(b"/*", min_start, cursor)
+            if start < 0:
+                break
+            comments.append(source[start:cursor].decode("utf-8", errors="ignore"))
+            cursor = start
+            continue
+        line_start = source.rfind(b"\n", min_start, cursor) + 1
+        line = source[line_start:cursor].lstrip()
+        if line.startswith(b"//"):
+            comments.append(line.decode("utf-8", errors="ignore"))
+            cursor = line_start
+            continue
+        break
+    comments.reverse()
     return " ".join(comments)
+
+
+def text_after_node_same_line(source: bytes, node) -> str:
+    line_end = source.find(b"\n", node.end_byte)
+    if line_end < 0:
+        line_end = len(source)
+    return source[node.end_byte:line_end].decode("utf-8", errors="ignore")
 
 
 def first_child_of_type(node, type_name: str):
@@ -424,7 +469,11 @@ def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None):
             class_header[class_name] = basename
             class_methods.setdefault(class_name, [])
 
-            comment_context = text_before_node_comments(source, tree, class_node)
+            comment_context = (
+                text_before_node_comments(source, tree, class_node) +
+                " " +
+                text_after_node_same_line(source, class_node)
+            )
             for match in vtable_pat.finditer(comment_context):
                 explicit_vtables[class_name] = int(match.group(1), 16)
             for match in ctor_pat.finditer(comment_context):
@@ -566,6 +615,40 @@ def find_vtable_addrs_from_capstone(
     return addrs
 
 
+def symbol_labels_for_function(function_symbols: dict[int, list[dict[str, Any]]], addr: int) -> tuple[str, ...]:
+    symbols = function_symbols.get(addr, [])
+    return tuple(f"{sym['class_name']}::{sym['method_name']}" for sym in symbols if sym.get("class_name"))
+
+
+def collect_vtable_writes(
+    image: PEImage,
+    starts: list[int],
+    code_start: int,
+    code_end: int,
+    rdata_min: int,
+    rdata_max: int,
+    policy: VtablePolicy,
+    function_symbols: dict[int, list[dict[str, Any]]],
+) -> dict[int, tuple[VtableWriteEvidence, ...]]:
+    writes: dict[int, list[VtableWriteEvidence]] = {}
+    for start in starts:
+        if not (code_start <= start < code_end):
+            continue
+        for instr in disassemble_function(image, starts, start, policy.max_function_bytes):
+            hit = vtable_store(instr, rdata_min, rdata_max, policy)
+            if hit is None:
+                continue
+            reg, addr = hit
+            writes.setdefault(addr, []).append(VtableWriteEvidence(
+                vtable_addr=addr,
+                function_addr=start,
+                instruction_addr=instr.address,
+                register=reg,
+                symbols=symbol_labels_for_function(function_symbols, start),
+            ))
+    return {addr: tuple(items) for addr, items in writes.items()}
+
+
 def analyze_constructor(
     image: PEImage,
     starts: list[int],
@@ -634,6 +717,91 @@ def constructor_symbols(function_symbols: dict[int, list[dict[str, Any]]]) -> di
     return result
 
 
+def class_or_descendant_of(class_name: str, ancestor: str, hierarchy: dict[str, str]) -> bool:
+    current = class_name
+    seen = set()
+    while current and current not in seen:
+        if current == ancestor:
+            return True
+        seen.add(current)
+        current = hierarchy.get(current, "")
+    return False
+
+
+def write_mentions_class_or_descendant(write: VtableWriteEvidence, class_name: str, hierarchy: dict[str, str]) -> bool:
+    for label in write.symbols:
+        symbol_class, _, _ = label.partition("::")
+        if symbol_class and class_or_descendant_of(symbol_class, class_name, hierarchy):
+            return True
+    return False
+
+
+def find_parent_vtable_candidates(
+    target: ProjectTarget,
+    image: PEImage,
+    starts: list[int],
+    classes: dict[str, dict[str, Any]],
+    parent_refs: tuple[tuple[str, str], ...],
+    all_vtable_addrs: tuple[int, ...],
+    code_start: int,
+    code_end: int,
+    rdata_min: int,
+    rdata_max: int,
+    policy: VtablePolicy,
+) -> tuple[ParentVtableCandidate, ...]:
+    if not parent_refs:
+        return ()
+
+    hierarchy, _, class_methods, _, _ = parse_header_metadata(target.source_dirs, target.map_skip)
+    function_symbols = find_source_function_symbols(target.source_dirs, target.map_skip)
+    writes_by_vtable = collect_vtable_writes(
+        image,
+        starts,
+        code_start,
+        code_end,
+        rdata_min,
+        rdata_max,
+        policy,
+        function_symbols,
+    )
+    known_addrs = {info["vtable_addr"] for info in classes.values()}
+    candidate_addrs = sorted((set(all_vtable_addrs) - known_addrs) & set(writes_by_vtable))
+    if not candidate_addrs:
+        return ()
+
+    expected_slots: dict[str, list[dict[str, Any] | None]] = {}
+    results = []
+    for class_name, parent in parent_refs:
+        parent_slots = build_expected_vtable_slots(parent, classes, class_methods, expected_slots, policy)
+        expected_count = len(parent_slots)
+        for addr in candidate_addrs:
+            writes = tuple(
+                write for write in writes_by_vtable[addr]
+                if write_mentions_class_or_descendant(write, class_name, hierarchy)
+            )
+            if not writes:
+                continue
+
+            idx = all_vtable_addrs.index(addr) if addr in all_vtable_addrs else -1
+            max_addr = all_vtable_addrs[idx + 1] if idx >= 0 and idx + 1 < len(all_vtable_addrs) else addr + 0x100
+            entries = read_vtable_entries(image, addr, code_start, code_end, max_addr)
+            if not entries:
+                continue
+
+            purecall_count = sum(1 for entry in entries if classify_function(image, starts, entry) == "thunk")
+            results.append(ParentVtableCandidate(
+                class_name=class_name,
+                parent=parent,
+                vtable_addr=addr,
+                entries_count=len(entries),
+                expected_count=expected_count,
+                purecall_count=purecall_count,
+                writes=writes,
+            ))
+
+    return tuple(results)
+
+
 def parse_class_info(
     target: ProjectTarget,
     image: PEImage,
@@ -641,9 +809,10 @@ def parse_class_info(
     rdata_min: int,
     rdata_max: int,
     policy: VtablePolicy,
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], frozenset[str]]:
     classes: dict[str, dict[str, Any]] = {}
     hierarchy, class_header, _, explicit_vtables, constructors = parse_header_metadata(target.source_dirs, target.map_skip)
+    known_class_names = set(class_header)
     symbols = find_source_function_symbols(target.source_dirs, target.map_skip)
     ctor_symbols = constructor_symbols(symbols)
     ctor_by_class = {
@@ -675,6 +844,7 @@ def parse_class_info(
 
     for item in policy.manual_classes:
         name = item["name"]
+        known_class_names.add(name)
         if name not in classes:
             classes[name] = {
                 "vtable_addr": parse_int(item["vtable_addr"], "vtables.manual_classes[].vtable_addr"),
@@ -699,7 +869,8 @@ def parse_class_info(
             if "header" in override:
                 classes[class_name]["header"] = override["header"]
 
-    return classes
+    known_class_names.update(policy.class_overrides)
+    return classes, frozenset(known_class_names)
 
 
 def find_constructor_parent_warnings(
@@ -1150,11 +1321,16 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
     header_addrs = find_vtable_addrs_from_headers(target.source_dirs, target.map_skip, rdata_min, rdata_max)
     all_vtable_addrs = tuple(sorted(capstone_addrs | header_addrs))
 
-    classes = parse_class_info(target, image, starts, rdata_min, rdata_max, policy)
+    classes, known_class_names = parse_class_info(target, image, starts, rdata_min, rdata_max, policy)
     invalid_parents = tuple(sorted(
         (class_name, info["parent"])
         for class_name, info in classes.items()
-        if info.get("parent") and info["parent"] not in classes
+        if info.get("parent") and info["parent"] not in classes and info["parent"] not in known_class_names
+    ))
+    parents_without_vtable_info = tuple(sorted(
+        (class_name, info["parent"])
+        for class_name, info in classes.items()
+        if info.get("parent") and info["parent"] not in classes and info["parent"] in known_class_names
     ))
     constructor_parent_warnings, constructor_parent_stats = find_constructor_parent_warnings(
         classes,
@@ -1164,6 +1340,19 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
         rdata_max,
         policy,
         options.filter_class,
+    )
+    parent_vtable_candidates = find_parent_vtable_candidates(
+        target,
+        image,
+        starts,
+        classes,
+        parents_without_vtable_info,
+        all_vtable_addrs,
+        code_start,
+        code_end,
+        rdata_min,
+        rdata_max,
+        policy,
     )
     reports, totals, unmatched = build_class_reports(
         target,
@@ -1184,6 +1373,8 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
         vtable_addresses=all_vtable_addrs,
         classes=classes,
         invalid_parents=invalid_parents,
+        parents_without_vtable_info=parents_without_vtable_info,
+        parent_vtable_candidates=parent_vtable_candidates,
         constructor_parent_warnings=tuple(constructor_parent_warnings),
         constructor_parent_stats=constructor_parent_stats,
         implementations_count=totals["implementations_count"],
@@ -1201,6 +1392,7 @@ def format_vtable_summary(summary: VtableSummary, dump: bool = False) -> str:
         f"Vtables: {len(summary.vtable_addresses)} unique addresses",
         f"Classes: {len(summary.classes)} with vtable info",
         f"Parents: {len(summary.invalid_parents)} invalid references",
+        f"Parents without vtable info: {len(summary.parents_without_vtable_info)} references",
         (
             f"Ctor hierarchy: {summary.constructor_parent_stats['checked']} checked, "
             f"{len(summary.constructor_parent_warnings)} warnings"
@@ -1218,6 +1410,33 @@ def format_vtable_summary(summary: VtableSummary, dump: bool = False) -> str:
         lines.append("Invalid parent references:")
         for class_name, parent in summary.invalid_parents:
             lines.append(f"  {class_name} -> {parent}")
+        lines.append("")
+
+    if summary.parents_without_vtable_info:
+        lines.append("Parent classes without vtable info:")
+        for class_name, parent in summary.parents_without_vtable_info:
+            lines.append(f"  {class_name} -> {parent}")
+        lines.append("")
+
+    if summary.parent_vtable_candidates:
+        lines.append("Candidate parent vtables from vptr writes:")
+        for item in summary.parent_vtable_candidates:
+            slot_status = (
+                "slot count matches"
+                if item.expected_count and item.entries_count == item.expected_count
+                else f"{item.entries_count}/{item.expected_count} slots"
+            )
+            write_parts = []
+            for write in item.writes[:3]:
+                label = ", ".join(write.symbols) if write.symbols else f"0x{write.function_addr:08X}"
+                write_parts.append(f"{label} @0x{write.instruction_addr:08X}")
+            if len(item.writes) > 3:
+                write_parts.append(f"+{len(item.writes) - 3} more")
+            purecall = f", {item.purecall_count} thunk/purecall-like" if item.purecall_count else ""
+            lines.append(
+                f"  {item.class_name} -> {item.parent}: 0x{item.vtable_addr:08X} "
+                f"({slot_status}{purecall}); writes: {'; '.join(write_parts)}"
+            )
         lines.append("")
 
     if summary.constructor_parent_warnings:

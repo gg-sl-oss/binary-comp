@@ -421,6 +421,39 @@ def register_alias_at(instrs: list[Instruction], idx: int, reg: str, policy: Ver
     return aliases.get(reg)
 
 
+def append_unique_alias(aliases: list[Operand], alias: Operand | None) -> None:
+    if alias is None:
+        return
+    key = (alias.kind, alias.base, alias.index, alias.scale, alias.disp)
+    if key in {(item.kind, item.base, item.index, item.scale, item.disp) for item in aliases}:
+        return
+    aliases.append(alias)
+
+
+def pointer_aliases_at(instrs: list[Instruction], idx: int, reg: str, policy: VerifierPolicy) -> list[Operand]:
+    aliases: list[Operand] = []
+    append_unique_alias(aliases, recent_pointer_alias(instrs, idx, reg, policy))
+    append_unique_alias(aliases, register_alias_at(instrs, idx, reg, policy))
+    return aliases
+
+
+def equivalent_alias_displacement(
+    c_alias: Operand | None,
+    o_alias: Operand | None,
+    c_disp: int,
+    o_disp: int,
+) -> bool:
+    if c_alias is None and o_alias is None:
+        return False
+    if c_alias is not None and o_alias is not None:
+        if c_alias.base != o_alias.base or c_alias.index != o_alias.index or c_alias.scale != o_alias.scale:
+            return False
+        return c_alias.disp + c_disp == o_alias.disp + o_disp
+    if c_alias is not None:
+        return c_alias.disp + c_disp == o_disp
+    return c_disp == o_alias.disp + o_disp
+
+
 def same_effective_lea_displacement(
     compiled_instrs: list[Instruction],
     original_instrs: list[Instruction],
@@ -430,21 +463,16 @@ def same_effective_lea_displacement(
     o_op: Operand,
     policy: VerifierPolicy,
 ) -> bool:
-    c_alias = recent_pointer_alias(compiled_instrs, ci, c_op.base, policy)
-    o_alias = recent_pointer_alias(original_instrs, oi, o_op.base, policy)
-    if c_alias is None:
-        c_alias = register_alias_at(compiled_instrs, ci, c_op.base, policy)
-    if o_alias is None:
-        o_alias = register_alias_at(original_instrs, oi, o_op.base, policy)
-    if c_alias is None and o_alias is None:
+    c_aliases = pointer_aliases_at(compiled_instrs, ci, c_op.base, policy)
+    o_aliases = pointer_aliases_at(original_instrs, oi, o_op.base, policy)
+    if not c_aliases and not o_aliases:
         return False
-    if c_alias is not None and o_alias is not None:
-        if c_alias.base != o_alias.base or c_alias.index != o_alias.index or c_alias.scale != o_alias.scale:
-            return False
-        return c_alias.disp + c_op.disp == o_alias.disp + o_op.disp
-    if c_alias is not None:
-        return c_alias.disp + c_op.disp == o_op.disp
-    return c_op.disp == o_alias.disp + o_op.disp
+
+    for c_alias in c_aliases or [None]:
+        for o_alias in o_aliases or [None]:
+            if equivalent_alias_displacement(c_alias, o_alias, c_op.disp, o_op.disp):
+                return True
+    return False
 
 
 def shifted_memory_base_match_count(
@@ -802,6 +830,22 @@ def format_warning(warning: tuple) -> str:
     return str(warning)
 
 
+def warning_kind_counts(warnings: tuple) -> dict[str, int]:
+    counts = {"imm": 0, "string": 0, "offset": 0}
+    for warning in warnings:
+        if not warning:
+            continue
+        kind = warning[0]
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def format_kind_counts(counts: dict[str, int]) -> str:
+    labels = (("imm", "IMM"), ("string", "STRING"), ("offset", "OFFSET"))
+    parts = [f"{label} {counts[kind]}" for kind, label in labels if counts.get(kind, 0)]
+    return ", ".join(parts) if parts else "none"
+
+
 def maybe_build(target: ProjectTarget, do_build: bool) -> int:
     if not do_build:
         return 0
@@ -921,6 +965,25 @@ def format_summary(summary: ValuesSummary, min_similarity: float = 0.0) -> str:
 
     if lines:
         lines.append("")
+    if summary.total_mismatches:
+        total_counts: dict[str, int] = {}
+        for _, result in summary.reports:
+            for kind, count in warning_kind_counts(result.warnings).items():
+                total_counts[kind] = total_counts.get(kind, 0) + count
+
+        lines.extend([
+            "--- Mismatch Breakdown ---",
+            f"By kind: {format_kind_counts(total_counts)}",
+            "Top functions:",
+        ])
+        top_reports = sorted(summary.reports, key=lambda item: len(item[1].warnings), reverse=True)[:10]
+        for group, result in top_reports:
+            lines.append(
+                f"  {group.name}: {len(result.warnings)} "
+                f"({format_kind_counts(warning_kind_counts(result.warnings))}; {result.similarity:.1f}%)"
+            )
+        lines.append("")
+
     lines.extend([
         "--- Summary ---",
         f"Functions checked: {summary.functions_checked}",
