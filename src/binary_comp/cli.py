@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from binary_comp.analyzers.calls import CallsOptions, check_calls, format_calls_summary
 from binary_comp.analyzers.data import (
     DataOptions,
     compare_address,
@@ -36,6 +37,20 @@ def add_values_parser(subparsers) -> None:
     parser.add_argument("--no-immediates", action="store_true", help="Do not report small numeric immediate mismatches")
     parser.add_argument("--no-offsets", action="store_true", help="Do not report member displacement mismatches")
     parser.set_defaults(handler=run_values)
+
+
+def add_calls_parser(subparsers) -> None:
+    parser = subparsers.add_parser("calls", help="Verify call target multisets against original disassembly")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
+    parser.add_argument("--target", default="full", help="Target name from config (default: full)")
+    parser.add_argument("filters", nargs="*", help="Optional function name or source-file filters")
+    parser.add_argument("--all", action="store_true", help="Show all mismatches, including unresolved original targets")
+    parser.add_argument("--no-build", action="store_true", help="Use existing assembly output")
+    parser.add_argument("--include-trivial", action="store_true", help="Report configured trivial calls")
+    parser.add_argument("--strict-memory", action="store_true", help="Do not canonicalize configured memory wrapper calls")
+    parser.add_argument("--build-arg", action="append", dest="build_args", help="Extra build argument; can be repeated")
+    parser.add_argument("--fail-on-mismatches", action="store_true", help="Exit 1 when call target mismatches are reported")
+    parser.set_defaults(handler=run_calls)
 
 
 def add_vtables_parser(subparsers) -> None:
@@ -141,6 +156,31 @@ def run_values(args) -> int:
     return 0
 
 
+def run_calls(args) -> int:
+    try:
+        config, target = load_project_target(args.config, args.target)
+        summary = check_calls(
+            config,
+            target,
+            CallsOptions(
+                filters=tuple(args.filters),
+                show_all=args.all,
+                build=not args.no_build,
+                include_trivial=args.include_trivial,
+                strict_memory=args.strict_memory,
+                build_args=tuple(args.build_args or ()),
+            ),
+        )
+    except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(format_calls_summary(summary))
+    if args.fail_on_mismatches and summary.mismatches:
+        return 1
+    return 0
+
+
 def run_vtables(args) -> int:
     try:
         config, target = load_project_target(args.config, args.target)
@@ -240,6 +280,7 @@ def run_globals(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="binary-comp")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    add_calls_parser(subparsers)
     add_data_parser(subparsers)
     add_globals_parser(subparsers)
     add_values_parser(subparsers)

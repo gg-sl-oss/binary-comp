@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from string import hexdigits
 
 
-CALLING_CONVENTIONS = (b"__cdecl", b"__fastcall", b"__stdcall", b"__thiscall")
+CALLING_CONVENTIONS = (
+    b"__cdecl",
+    b"__fastcall",
+    b"__stdcall",
+    b"__thiscall",
+    b"CALLBACK",
+    b"WINAPI",
+)
 
 
 @dataclass(frozen=True)
@@ -128,6 +135,74 @@ def function_name_from_definition(source: bytes, function_node) -> str | None:
     return node_text(source, name_node).strip()
 
 
+def parameter_list_from_definition(function_node):
+    declarator = function_node.child_by_field_name("declarator")
+    if declarator is None:
+        declarator = function_node
+
+    function_declarator = find_function_declarator(declarator)
+    if function_declarator is None:
+        return None
+
+    parameter_list = function_declarator.child_by_field_name("parameters")
+    if parameter_list is not None:
+        return parameter_list
+    for child in function_declarator.children:
+        if child.type == "parameter_list":
+            return child
+    return None
+
+
+def parameter_type_name(source: bytes, parameter_node) -> str | None:
+    text = node_text(source, parameter_node).strip()
+    if text == "void":
+        return None
+
+    type_name = None
+    for child in walk(parameter_node):
+        if child.type in ("primitive_type", "qualified_identifier", "scoped_type_identifier", "type_identifier"):
+            type_name = node_text(source, child).strip()
+            break
+    if not type_name:
+        return None
+
+    if "*" in text:
+        type_name += "*"
+    elif "&" in text:
+        type_name += "&"
+    return type_name
+
+
+def parameter_signature(source: bytes, function_node) -> str | None:
+    parameter_list = parameter_list_from_definition(function_node)
+    if parameter_list is None:
+        return None
+
+    parameters = []
+    for child in parameter_list.children:
+        if child.type != "parameter_declaration":
+            continue
+        type_name = parameter_type_name(source, child)
+        if type_name is not None:
+            parameters.append(type_name)
+    return ",".join(parameters)
+
+
+def function_name_with_optional_signature(
+    source: bytes,
+    function_node,
+    signature_names: frozenset[str],
+) -> str | None:
+    name = function_name_from_definition(source, function_node)
+    if name is None or name not in signature_names:
+        return name
+
+    signature = parameter_signature(source, function_node)
+    if signature is None:
+        return name
+    return f"{name}({signature})"
+
+
 def effective_function_start(function_node) -> int:
     parent = function_node.parent
     if parent is not None and parent.type == "linkage_specification":
@@ -176,6 +251,7 @@ def gap_is_only_comments_or_whitespace(
 def parse_source_function_markers(
     path: str,
     include_no_assembly: bool = False,
+    signature_names: frozenset[str] = frozenset(),
 ) -> list[SourceFunctionMarker]:
     with open(path, "rb") as f:
         source = f.read()
@@ -195,7 +271,7 @@ def parse_source_function_markers(
             if address is not None:
                 comments.append((node.start_byte, node.end_byte, node.start_point.row + 1, address))
         elif node.type == "function_definition":
-            name = function_name_from_definition(source, node)
+            name = function_name_with_optional_signature(source, node, signature_names)
             if name is not None:
                 functions.append((effective_function_start(node), name))
 
@@ -238,18 +314,26 @@ def parse_source_function_comments(path: str, include_no_assembly: bool = False)
     return markers
 
 
-def parse_source_functions(path: str, include_no_assembly: bool = False) -> list[SourceFunction]:
+def parse_source_functions(
+    path: str,
+    include_no_assembly: bool = False,
+    signature_names: frozenset[str] = frozenset(),
+) -> list[SourceFunction]:
     return [
         SourceFunction(address=marker.address, name=marker.name, line=marker.line)
-        for marker in parse_source_function_markers(path, include_no_assembly)
+        for marker in parse_source_function_markers(path, include_no_assembly, signature_names)
     ]
 
 
-def parse_source_function_groups(path: str, include_no_assembly: bool = False) -> list[SourceFunctionGroup]:
+def parse_source_function_groups(
+    path: str,
+    include_no_assembly: bool = False,
+    signature_names: frozenset[str] = frozenset(),
+) -> list[SourceFunctionGroup]:
     groups: list[SourceFunctionGroup] = []
     current = None
 
-    for marker in parse_source_function_markers(path, include_no_assembly):
+    for marker in parse_source_function_markers(path, include_no_assembly, signature_names):
         group_key = (marker.function_start, marker.name)
         if current is None or current["key"] != group_key:
             if current is not None:

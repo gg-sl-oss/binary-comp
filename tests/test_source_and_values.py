@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from binary_comp.analyzers.calls import normalize_compiled
 from binary_comp.analyzers.values import ValuesOptions, check_values, format_summary, load_policy
 from binary_comp.config import BuildConfig, ProjectTarget, load_project_target
 from binary_comp.source.cpp import parse_source_function_groups
@@ -18,6 +19,31 @@ def test_source_function_groups_from_cpp_fixture(fixture_root):
     assert len(groups) == 1
     assert groups[0].name == "sample_function"
     assert groups[0].addresses == ("00401000",)
+
+
+def test_source_function_groups_can_add_configured_signatures(tmp_path):
+    source = tmp_path / "overload.cpp"
+    source.write_text(
+        """
+struct Item {};
+struct Box {
+  Item* Take(Item* item);
+};
+/* Function start: 0x00401000 */
+Item* Box::Take(Item* item) { return item; }
+""",
+        encoding="utf-8",
+    )
+
+    groups = parse_source_function_groups(str(source), signature_names=frozenset({"Box::Take"}))
+
+    assert groups[0].name == "Box::Take(Item*)"
+
+
+def test_msvc_member_name_can_use_configured_signature():
+    symbol = "?Take@Box@@QAEPAVItem@@PAV2@@Z"
+
+    assert normalize_compiled(symbol, frozenset({"Box::Take"})) == "Box::Take(Item*)"
 
 
 def test_source_groups_map_to_rebuilt_symbols(fixture_root):
@@ -45,6 +71,7 @@ def test_load_minimal_project_config(fixture_root):
     assert target.code_globals_header == str(fixture_root / "code" / "globals.h")
     assert target.define_headers == (str(fixture_root / "src" / "constants.h"),)
     assert target.auto_complete == str(fixture_root / "src" / "auto_complete.txt")
+    assert target.asm_dir == str(fixture_root / "out")
 
 
 def test_standalone_values_policy_is_relative_to_config(tmp_path):

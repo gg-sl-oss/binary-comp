@@ -6,7 +6,8 @@
       "map": "path/to/rebuilt.map",
       "source_dirs": ["path/to/src"],
       "globals_source": "path/to/src/globals.cpp",
-      "code_export_dir": "path/to/ghidra-export"
+      "code_export_dir": "path/to/ghidra-export",
+      "asm_dir": "path/to/asm-output"
     }
   }
 }

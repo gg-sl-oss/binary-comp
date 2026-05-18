@@ -10,7 +10,8 @@
       "code_globals_header": "code/globals.h",
       "define_headers": ["src/constants.h"],
       "auto_complete": "src/auto_complete.txt",
-      "code_export_dir": "code"
+      "code_export_dir": "code",
+      "asm_dir": "out"
     }
   }
 }

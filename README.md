@@ -4,11 +4,12 @@ Standalone binary comparison and verification tools for C/C++ reimplementation
 projects.
 
 The package is being extracted from project-specific scripts into reusable
-library modules plus a CLI. The current analyzers cover Capstone-backed operand
-value checks, global data comparison, global declaration audits, and vtable
-verification:
+library modules plus a CLI. The current analyzers cover call target
+verification, Capstone-backed operand value checks, global data comparison,
+global declaration audits, and vtable verification:
 
 ```bash
+binary-comp calls --config path/to/binary-comp.json --target full
 binary-comp values --config path/to/binary-comp.json --target full
 binary-comp data --config path/to/binary-comp.json --target full
 binary-comp globals --config path/to/binary-comp.json --target full
@@ -25,10 +26,12 @@ required.
 ## Minimal configuration
 
 The value checker needs only a target description: original binary, rebuilt
-binary, linker map, and source directory. The vtable checker needs the original
-binary, source directory, and a Ghidra export directory for function-boundary
-hints. The data checker and globals audit also need a globals source file with
-original addresses encoded in symbol names or comments.
+binary, linker map, and source directory. The call target checker needs source
+annotations, a Ghidra disassembly export directory, and compiler assembly
+listings via `asm_dir`. The vtable checker needs the original binary, source
+directory, and a Ghidra export directory for function-boundary hints. The data
+checker and globals audit also need a globals source file with original
+addresses encoded in symbol names or comments.
 
 The globals audit can use optional `globals_header`, `code_globals_header`,
 `define_headers`, and `auto_complete` paths for broader coverage. Analyzer
@@ -46,7 +49,8 @@ operands and vtable writes are decoded from the binaries with Capstone.
       "map": "path/to/rebuilt.map",
       "source_dirs": ["path/to/src"],
       "globals_source": "path/to/src/globals.cpp",
-      "code_export_dir": "path/to/ghidra-export"
+      "code_export_dir": "path/to/ghidra-export",
+      "asm_dir": "path/to/asm-output"
     }
   }
 }

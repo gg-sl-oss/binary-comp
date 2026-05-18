@@ -42,6 +42,7 @@ class ProjectTarget:
     define_headers: tuple[str, ...] = ()
     auto_complete: str | None = None
     code_dir: str | None = None
+    asm_dir: str | None = None
     map_skip: str | None = None
     build: BuildConfig = BuildConfig()
     values_policy: str | None = None
@@ -190,6 +191,10 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
             optional_string(target_cfg, "code_export_dir") or optional_string(target_cfg, "code_dir"),
             base,
         ),
+        asm_dir=_resolve_standalone_path(
+            optional_string(target_cfg, "asm_dir") or optional_string(target_cfg, "out_dir"),
+            base,
+        ),
         map_skip=optional_string(target_cfg, "map_skip"),
         build=build,
         values_policy=_resolve_standalone_path(policy, base),
@@ -238,6 +243,7 @@ def _target_from_legacy(config: dict[str, Any], target: str) -> ProjectTarget:
         ),
         auto_complete=optional_string(path_cfg, "auto_complete"),
         code_dir=optional_string(path_cfg, "code_dir"),
+        asm_dir=optional_string(path_cfg, "out_dir"),
         map_skip=optional_string(path_cfg, "map_skip"),
         build=BuildConfig(
             clean=f"make {optional_string(path_cfg, 'clean_target')}" if optional_string(path_cfg, "clean_target") else None,
