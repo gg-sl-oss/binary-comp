@@ -43,6 +43,7 @@ def test_load_minimal_project_config(fixture_root):
     assert target.globals_source == str(fixture_root / "src" / "globals.cpp")
     assert target.globals_header == str(fixture_root / "src" / "globals.h")
     assert target.code_globals_header == str(fixture_root / "code" / "globals.h")
+    assert target.define_headers == (str(fixture_root / "src" / "constants.h"),)
     assert target.auto_complete == str(fixture_root / "src" / "auto_complete.txt")
 
 

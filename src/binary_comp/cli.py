@@ -57,6 +57,8 @@ def add_globals_parser(subparsers) -> None:
     parser.add_argument("--globals-source", "--globals-c", dest="globals_source", help="Global definitions source override")
     parser.add_argument("--globals-h", dest="globals_header", help="Global declarations header override")
     parser.add_argument("--code-globals-h", dest="code_globals_header", help="Code export globals header override")
+    parser.add_argument("--define-header", action="append", dest="define_headers",
+                        help="Header to scan for integer #define constants; can be repeated")
     parser.add_argument("--code-dir", help="Code export directory used for function-boundary hints")
     parser.add_argument("--auto-complete", help="Function list for global side-effect auditing")
     parser.add_argument("--data-section", action="append", dest="data_sections",
@@ -77,6 +79,8 @@ def add_globals_parser(subparsers) -> None:
                         help="Do not report MOV ECX,global followed by CALL/JMP in listed functions")
     parser.add_argument("--no-auto-complete-global-effects", action="store_true",
                         help="Disable listed-function global side-effect auditing")
+    parser.add_argument("--no-address-warnings", action="store_true",
+                        help="Do not report globals without address annotations")
     parser.add_argument("--show-auto-complete-reviewed", action="store_true",
                         help="Print reviewed listed-function global side-effect details")
     parser.add_argument("--no-source-order", action="store_true",
@@ -169,6 +173,7 @@ def run_globals(args) -> int:
                 globals_source=args.globals_source,
                 globals_header=args.globals_header,
                 code_globals_header=args.code_globals_header,
+                define_headers=tuple(args.define_headers or ()),
                 code_dir=args.code_dir,
                 auto_complete=args.auto_complete,
                 data_sections=tuple(args.data_sections or [".data"]),
@@ -181,6 +186,7 @@ def run_globals(args) -> int:
                 include_auto_complete_data_args=args.include_auto_complete_data_args,
                 no_auto_complete_this_calls=args.no_auto_complete_this_calls,
                 no_auto_complete_global_effects=args.no_auto_complete_global_effects,
+                no_address_warnings=args.no_address_warnings,
                 show_auto_complete_reviewed=args.show_auto_complete_reviewed,
                 no_source_order=args.no_source_order,
                 source_order_all=args.source_order_all,

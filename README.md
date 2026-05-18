@@ -27,12 +27,12 @@ binary, linker map, and source directory. The data checker and globals audit
 also need a globals source file with original addresses encoded in symbol names
 or comments.
 
-The globals audit can use optional `globals_header`, `code_globals_header`, and
-`auto_complete` paths for broader coverage. Analyzer policy such as custom type
-sizes and reviewed auto-complete effects lives in top-level config sections when
-needed; absent optional sections are treated as empty. Function boundaries from a
-Ghidra export directory are optional hints; operands are always decoded from the
-binaries with Capstone.
+The globals audit can use optional `globals_header`, `code_globals_header`,
+`define_headers`, and `auto_complete` paths for broader coverage. Analyzer
+policy such as custom type sizes and reviewed auto-complete effects lives in
+top-level config sections when needed; absent optional sections are treated as
+empty. Function boundaries from a Ghidra export directory are optional hints;
+operands are always decoded from the binaries with Capstone.
 
 ```json
 {

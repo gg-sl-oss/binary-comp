@@ -39,6 +39,7 @@ class ProjectTarget:
     globals_source: str | None = None
     globals_header: str | None = None
     code_globals_header: str | None = None
+    define_headers: tuple[str, ...] = ()
     auto_complete: str | None = None
     code_dir: str | None = None
     map_skip: str | None = None
@@ -86,11 +87,20 @@ def optional_string(config: dict[str, Any], key: str) -> str | None:
 
 
 def _source_dirs(value: Any, label: str) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
     if isinstance(value, str) and value:
         return (value,)
-    if isinstance(value, list) and value and all(isinstance(item, str) and item for item in value):
+    if isinstance(value, list) and all(isinstance(item, str) and item for item in value):
         return tuple(value)
-    raise ConfigError(f"{label} must be a non-empty string or list of strings")
+    raise ConfigError(f"{label} must be a string or list of strings")
+
+
+def _required_source_dirs(value: Any, label: str) -> tuple[str, ...]:
+    paths = _source_dirs(value, label)
+    if not paths:
+        raise ConfigError(f"{label} must be a non-empty string or list of strings")
+    return paths
 
 
 def _resolve_standalone_path(value: str | None, base: Path) -> str | None:
@@ -149,7 +159,7 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
         raise ConfigError(f"targets.{target}.values must be an object")
 
     policy = optional_string(values, "policy") or optional_string(policies, "values")
-    source_dirs = _source_dirs(
+    source_dirs = _required_source_dirs(
         target_cfg.get("source_dirs") or target_cfg.get("source_dir"),
         f"targets.{target}.source_dirs",
     )
@@ -168,6 +178,13 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
         globals_source=_resolve_standalone_path(optional_string(target_cfg, "globals_source"), base),
         globals_header=_resolve_standalone_path(optional_string(target_cfg, "globals_header"), base),
         code_globals_header=_resolve_standalone_path(optional_string(target_cfg, "code_globals_header"), base),
+        define_headers=_resolve_standalone_paths(
+            _source_dirs(
+                target_cfg.get("define_headers") or target_cfg.get("define_header"),
+                f"targets.{target}.define_headers",
+            ),
+            base,
+        ),
         auto_complete=_resolve_standalone_path(optional_string(target_cfg, "auto_complete"), base),
         code_dir=_resolve_standalone_path(
             optional_string(target_cfg, "code_export_dir") or optional_string(target_cfg, "code_dir"),
@@ -215,6 +232,10 @@ def _target_from_legacy(config: dict[str, Any], target: str) -> ProjectTarget:
         globals_source=optional_string(path_cfg, "globals_source"),
         globals_header=optional_string(path_cfg, "globals_header"),
         code_globals_header=optional_string(path_cfg, "code_globals_header"),
+        define_headers=_source_dirs(
+            path_cfg.get("define_headers") or path_cfg.get("define_header"),
+            f"paths.{target}.define_headers",
+        ),
         auto_complete=optional_string(path_cfg, "auto_complete"),
         code_dir=optional_string(path_cfg, "code_dir"),
         map_skip=optional_string(path_cfg, "map_skip"),

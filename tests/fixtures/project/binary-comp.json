@@ -8,6 +8,7 @@
       "globals_source": "src/globals.cpp",
       "globals_header": "src/globals.h",
       "code_globals_header": "code/globals.h",
+      "define_headers": ["src/constants.h"],
       "auto_complete": "src/auto_complete.txt",
       "code_export_dir": "code"
     }

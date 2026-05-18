@@ -133,6 +133,7 @@ class GlobalsAuditOptions:
     globals_source: str | None = None
     globals_header: str | None = None
     code_globals_header: str | None = None
+    define_headers: tuple[str, ...] = ()
     code_dir: str | None = None
     auto_complete: str | None = None
     data_sections: tuple[str, ...] = (".data",)
@@ -145,6 +146,7 @@ class GlobalsAuditOptions:
     include_auto_complete_data_args: bool = False
     no_auto_complete_this_calls: bool = False
     no_auto_complete_global_effects: bool = False
+    no_address_warnings: bool = False
     show_auto_complete_reviewed: bool = False
     no_source_order: bool = False
     source_order_all: bool = False
@@ -156,6 +158,7 @@ class GlobalsAuditInputs:
     globals_source: str
     globals_h: str | None
     code_globals_h: str | None
+    define_headers: tuple[str, ...]
     code_dir: str
     auto_complete: str | None
     data_sections: tuple[str, ...]
@@ -168,6 +171,7 @@ class GlobalsAuditInputs:
     include_auto_complete_data_args: bool
     no_auto_complete_this_calls: bool
     no_auto_complete_global_effects: bool
+    no_address_warnings: bool
     show_auto_complete_reviewed: bool
     no_source_order: bool
     source_order_all: bool
@@ -1615,6 +1619,7 @@ def resolve_audit_inputs(config: dict[str, Any], target: ProjectTarget, options:
         globals_source=require_path(options.globals_source or target.globals_source, "globals_source"),
         globals_h=options.globals_header or target.globals_header,
         code_globals_h=options.code_globals_header or target.code_globals_header,
+        define_headers=options.define_headers or target.define_headers,
         code_dir=options.code_dir or target.code_dir or "",
         auto_complete=auto_complete,
         data_sections=options.data_sections,
@@ -1627,6 +1632,7 @@ def resolve_audit_inputs(config: dict[str, Any], target: ProjectTarget, options:
         include_auto_complete_data_args=options.include_auto_complete_data_args,
         no_auto_complete_this_calls=options.no_auto_complete_this_calls,
         no_auto_complete_global_effects=options.no_auto_complete_global_effects,
+        no_address_warnings=options.no_address_warnings,
         show_auto_complete_reviewed=options.show_auto_complete_reviewed,
         no_source_order=options.no_source_order,
         source_order_all=options.source_order_all,
@@ -1637,11 +1643,12 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
     inputs = resolve_audit_inputs(config, target, options)
     globals_config = get_section(config, "globals")
     runtime_seeded_globals = configure_globals(globals_config)
-    constants = parse_defines([inputs.globals_h])
+    constants = parse_defines([inputs.globals_h, *inputs.define_headers])
     pe = PEImage(inputs.exe)
     address_warnings: List[AddressWarning] = []
-    decls = parse_globals_source(inputs.globals_source, address_warnings)
-    header_decls = parse_globals_header(inputs.globals_h, address_warnings)
+    warning_sink: list[AddressWarning] | None = None if inputs.no_address_warnings else address_warnings
+    decls = parse_globals_source(inputs.globals_source, warning_sink)
+    header_decls = parse_globals_header(inputs.globals_h, warning_sink)
     code_globals = parse_code_globals(inputs.code_globals_h)
     function_symbols = parse_function_symbols(os.path.dirname(inputs.globals_source) or ".")
     issues = build_issues(pe, decls, header_decls, code_globals, function_symbols,
