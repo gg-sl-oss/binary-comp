@@ -47,6 +47,31 @@ def test_load_minimal_project_config(fixture_root):
     assert target.auto_complete == str(fixture_root / "src" / "auto_complete.txt")
 
 
+def test_standalone_values_policy_is_relative_to_config(tmp_path):
+    config_path = tmp_path / "config" / "binary-comp.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        """
+{
+  "targets": {
+    "full": {
+      "original_exe": "../original.exe",
+      "rebuilt_exe": "../rebuilt.exe",
+      "map": "../rebuilt.map",
+      "source_dirs": ["../src"],
+      "values": {"policy": "values-policy.json"}
+    }
+  }
+}
+""",
+        encoding="utf-8",
+    )
+
+    _, target = load_project_target(str(config_path), "full")
+
+    assert target.values_policy == str(config_path.parent / "values-policy.json")
+
+
 def test_value_checker_on_generated_fixture_project(fixture_root, sample_binaries):
     pytest.importorskip("capstone")
     original, rebuilt = sample_binaries

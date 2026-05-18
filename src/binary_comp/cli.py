@@ -17,6 +17,7 @@ from binary_comp.analyzers.data import (
 )
 from binary_comp.analyzers.globals import GlobalsAuditOptions, audit_globals, format_report
 from binary_comp.analyzers.values import ValuesOptions, check_values, format_summary, load_policy
+from binary_comp.analyzers.vtables import VtableOptions, check_vtables, format_vtable_summary
 from binary_comp.config import ConfigError, DEFAULT_CONFIG_PATH, load_project_target
 
 
@@ -35,6 +36,17 @@ def add_values_parser(subparsers) -> None:
     parser.add_argument("--no-immediates", action="store_true", help="Do not report small numeric immediate mismatches")
     parser.add_argument("--no-offsets", action="store_true", help="Do not report member displacement mismatches")
     parser.set_defaults(handler=run_values)
+
+
+def add_vtables_parser(subparsers) -> None:
+    parser = subparsers.add_parser("vtables", help="Verify vtables against source and original PE data")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
+    parser.add_argument("--target", default="full", help="Target name from config (default: full)")
+    parser.add_argument("--dump", action="store_true", help="Show full vtable dump")
+    parser.add_argument("--class", dest="filter_class", help="Filter to specific class")
+    parser.add_argument("--rdata-min", type=lambda value: int(value, 0), help="Fallback .rdata start address")
+    parser.add_argument("--rdata-max", type=lambda value: int(value, 0), help="Fallback .rdata end address")
+    parser.set_defaults(handler=run_vtables)
 
 
 def add_data_parser(subparsers) -> None:
@@ -129,6 +141,27 @@ def run_values(args) -> int:
     return 0
 
 
+def run_vtables(args) -> int:
+    try:
+        config, target = load_project_target(args.config, args.target)
+        summary = check_vtables(
+            config,
+            target,
+            VtableOptions(
+                dump=args.dump,
+                filter_class=args.filter_class,
+                rdata_min=args.rdata_min,
+                rdata_max=args.rdata_max,
+            ),
+        )
+    except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(format_vtable_summary(summary, dump=args.dump))
+    return 1 if summary.has_failures else 0
+
+
 def run_data(args) -> int:
     try:
         _, target = load_project_target(args.config, args.target)
@@ -210,6 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_data_parser(subparsers)
     add_globals_parser(subparsers)
     add_values_parser(subparsers)
+    add_vtables_parser(subparsers)
     return parser
 
 

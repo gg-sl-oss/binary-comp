@@ -192,7 +192,7 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
         ),
         map_skip=optional_string(target_cfg, "map_skip"),
         build=build,
-        values_policy=policy,
+        values_policy=_resolve_standalone_path(policy, base),
     )
 
 
