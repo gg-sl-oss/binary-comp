@@ -16,6 +16,11 @@ from binary_comp.analyzers.data import (
     format_missing_globals,
     require_globals_source,
 )
+from binary_comp.analyzers.global_access import (
+    GlobalAccessOptions,
+    check_global_accesses,
+    format_global_access_summary,
+)
 from binary_comp.analyzers.globals import GlobalsAuditOptions, audit_globals, format_report
 from binary_comp.analyzers.values import ValuesOptions, check_values, format_summary, load_policy
 from binary_comp.analyzers.vtables import VtableOptions, check_vtables, format_vtable_summary
@@ -51,6 +56,21 @@ def add_calls_parser(subparsers) -> None:
     parser.add_argument("--build-arg", action="append", dest="build_args", help="Extra build argument; can be repeated")
     parser.add_argument("--fail-on-mismatches", action="store_true", help="Exit 1 when call target mismatches are reported")
     parser.set_defaults(handler=run_calls)
+
+
+def add_global_access_parser(subparsers) -> None:
+    parser = subparsers.add_parser("global-access", help="Verify global access multisets against original disassembly")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
+    parser.add_argument("--target", default="full", help="Target name from config (default: full)")
+    parser.add_argument("filters", nargs="*", help="Optional function name or source-file filters")
+    parser.add_argument("--all", action="store_true", help="Show all mismatches, including unresolved address tokens")
+    parser.add_argument("--no-build", action="store_true", help="Use existing assembly output")
+    parser.add_argument("--include-address-immediates", action="store_true",
+                        help="Also compare immediate data-address references such as PUSH/OFFSET globals")
+    parser.add_argument("--build-arg", action="append", dest="build_args", help="Extra build argument; can be repeated")
+    parser.add_argument("--fail-on-mismatches", action="store_true",
+                        help="Exit 1 when global access mismatches are reported")
+    parser.set_defaults(handler=run_global_access)
 
 
 def add_vtables_parser(subparsers) -> None:
@@ -91,6 +111,9 @@ def add_globals_parser(subparsers) -> None:
     parser.add_argument("--data-section", action="append", dest="data_sections",
                         help="Writable section to scan for auto-complete side effects; defaults to .data")
     parser.add_argument("--min-address", type=lambda value: int(value, 0), help="Ignore lower original addresses")
+    parser.add_argument("--max-address", type=lambda value: int(value, 0), help="Ignore higher original addresses")
+    parser.add_argument("--issue-kind", action="append", dest="issue_kinds",
+                        help="Only report this issue category; can be repeated or comma-separated")
     parser.add_argument("--max-issues", type=int, default=200, help="Maximum issues to print; 0 prints all")
     parser.add_argument("--max-auto-facts", type=int, default=12,
                         help="Maximum auto-complete facts to print per function; 0 prints all")
@@ -181,6 +204,30 @@ def run_calls(args) -> int:
     return 0
 
 
+def run_global_access(args) -> int:
+    try:
+        config, target = load_project_target(args.config, args.target)
+        summary = check_global_accesses(
+            config,
+            target,
+            GlobalAccessOptions(
+                filters=tuple(args.filters),
+                build=not args.no_build,
+                include_address_immediates=args.include_address_immediates,
+                build_args=tuple(args.build_args or ()),
+                show_all=args.all,
+            ),
+        )
+    except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(format_global_access_summary(summary))
+    if args.fail_on_mismatches and summary.mismatches:
+        return 1
+    return 0
+
+
 def run_vtables(args) -> int:
     try:
         config, target = load_project_target(args.config, args.target)
@@ -251,6 +298,8 @@ def run_globals(args) -> int:
                 auto_complete=args.auto_complete,
                 data_sections=tuple(args.data_sections or [".data"]),
                 min_address=args.min_address,
+                max_address=args.max_address,
+                issue_kinds=tuple(args.issue_kinds or ()),
                 max_issues=args.max_issues,
                 max_auto_facts=args.max_auto_facts,
                 auto_complete_max_function_bytes=args.auto_complete_max_function_bytes,
@@ -282,6 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     add_calls_parser(subparsers)
     add_data_parser(subparsers)
+    add_global_access_parser(subparsers)
     add_globals_parser(subparsers)
     add_values_parser(subparsers)
     add_vtables_parser(subparsers)

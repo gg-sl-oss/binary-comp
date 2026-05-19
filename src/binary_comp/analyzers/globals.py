@@ -138,6 +138,8 @@ class GlobalsAuditOptions:
     auto_complete: str | None = None
     data_sections: tuple[str, ...] = (".data",)
     min_address: int | None = None
+    max_address: int | None = None
+    issue_kinds: tuple[str, ...] = ()
     max_issues: int = 200
     max_auto_facts: int = 12
     auto_complete_max_function_bytes: int = 4096
@@ -163,6 +165,8 @@ class GlobalsAuditInputs:
     auto_complete: str | None
     data_sections: tuple[str, ...]
     min_address: int
+    max_address: int | None
+    issue_kinds: frozenset[str]
     max_issues: int
     max_auto_facts: int
     auto_complete_max_function_bytes: int
@@ -611,6 +615,10 @@ def normalize_type(type_text: str) -> str:
     return type_text
 
 
+def runtime_initializer_copy_map(globals_config: Dict) -> Dict[int, int]:
+    return parse_int_value_map(globals_config.get("runtime_initializer_copies", {}))
+
+
 def configure_globals(globals_config: Dict) -> Dict[int, int]:
     global TYPE_SIZES, STRUCT_FORMATS, SYMBOLIC_STRUCT_ARRAYS
 
@@ -877,6 +885,22 @@ def resolve_symbolic_pointer(expr: str,
         return None
 
 
+def resolve_symbolic_scalar_initializer(expr: str,
+                                        constants: Dict[str, int],
+                                        data_symbols: Dict[str, GlobalDecl]) -> Optional[int]:
+    expr = strip_outer_casts(expr.rstrip(";")).strip()
+    if expr in data_symbols:
+        return data_symbols[expr].address
+    numeric = re.sub(r"\b(0x[0-9A-Fa-f]+)[uUlL]+\b", r"\1", expr)
+    numeric = re.sub(r"\b([0-9]+)[uUlL]+\b", r"\1", numeric)
+    if re.search(r"[A-Za-z_]", re.sub(r"0x[0-9A-Fa-f]+", "", numeric)):
+        return None
+    try:
+        return eval_int_expr(expr, constants)
+    except Exception:
+        return None
+
+
 def symbolic_struct_array_bytes(decl: GlobalDecl,
                                 constants: Dict[str, int],
                                 data_symbols: Dict[str, GlobalDecl],
@@ -1038,6 +1062,8 @@ AUTO_WRITE_MNEMONICS = {
 
 def load_auto_complete(path: str) -> Dict[int, AutoEntry]:
     entries: Dict[int, AutoEntry] = {}
+    if not path:
+        return entries
     active_note = ""
     pending_comments: List[str] = []
     with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -1170,6 +1196,77 @@ def disassemble_auto_function(pe: PEImage,
     return instructions
 
 
+def read_u32(pe: PEImage, address: int) -> Optional[int]:
+    data = pe.read(address, 4)
+    if data is None or len(data) != 4:
+        return None
+    return struct.unpack("<I", data)[0]
+
+
+def table_text_pointers(pe: PEImage, start: int, end: int, code_start: int, code_end: int) -> Optional[List[int]]:
+    if start >= end or start & 3 or end & 3 or end - start > 0x400:
+        return None
+    pointers: List[int] = []
+    for address in range(start, end, 4):
+        value = read_u32(pe, address)
+        if value is None:
+            return None
+        if value == 0:
+            continue
+        if not (code_start <= value < code_end):
+            return None
+        pointers.append(value)
+    return pointers if pointers else None
+
+
+def merge_auto_entry(entries: Dict[int, AutoEntry], address: int, note: str) -> None:
+    entry = entries.setdefault(address, AutoEntry(address, set()))
+    if note:
+        entry.notes.add(note)
+
+
+def discover_crt_initializer_entries(pe: PEImage,
+                                     code_start: int,
+                                     code_end: int,
+                                     data_ranges: Sequence[Tuple[int, int]]) -> Dict[int, AutoEntry]:
+    """Find MSVC _initterm-style pointer ranges in the original executable."""
+    code = pe.read(code_start, code_end - code_start)
+    if not code:
+        return {}
+
+    md = Cs(CS_ARCH_X86, CS_MODE_32)
+    md.detail = True
+    md.skipdata = True
+    entries: Dict[int, AutoEntry] = {}
+    window: List = []
+    for insn in md.disasm(code, code_start):
+        window.append(insn)
+        if len(window) > 3:
+            window.pop(0)
+        if len(window) < 3 or insn.mnemonic.lower() != "call":
+            continue
+
+        end_push, start_push = window[0], window[1]
+        if end_push.mnemonic.lower() != "push" or start_push.mnemonic.lower() != "push":
+            continue
+        if not end_push.operands or not start_push.operands:
+            continue
+        end = operand_immediate(end_push.operands[0])
+        start = operand_immediate(start_push.operands[0])
+        if start is None or end is None:
+            continue
+        if not address_in_ranges(start, data_ranges) or not address_in_ranges(end - 1, data_ranges):
+            continue
+
+        pointers = table_text_pointers(pe, start, end, code_start, code_end)
+        if pointers is None:
+            continue
+        note = f"CRT initializer table 0x{start:08x}..0x{end:08x}"
+        for pointer in pointers:
+            merge_auto_entry(entries, pointer, note)
+    return entries
+
+
 def instruction_text(insn) -> str:
     return f"{insn.mnemonic.upper()} {insn.op_str}".strip()
 
@@ -1296,9 +1393,7 @@ def build_auto_complete_global_effects(pe: PEImage,
         return []
     if Cs is None:
         raise ConfigError("capstone is required for auto-complete global-effect auditing")
-    if not args.auto_complete:
-        return []
-    if not os.path.exists(args.auto_complete):
+    if args.auto_complete and not os.path.exists(args.auto_complete):
         raise ConfigError(f"auto_complete file not found: {args.auto_complete}")
 
     code_start, code_end = text_section_bounds(pe)
@@ -1307,6 +1402,12 @@ def build_auto_complete_global_effects(pe: PEImage,
         raise ConfigError(f"no matching writable data sections found in {args.exe}")
 
     entries = load_auto_complete(args.auto_complete)
+    for address, discovered in discover_crt_initializer_entries(pe, code_start, code_end, data_ranges).items():
+        entry = entries.setdefault(address, AutoEntry(address, set()))
+        entry.notes.update(discovered.notes)
+    if not entries:
+        return []
+
     hint_starts, instruction_counts = capstone_function_hints(args.code_dir, code_start, code_end)
     starts = set(hint_starts)
     starts.update(address for address in entries if code_start <= address < code_end)
@@ -1398,6 +1499,7 @@ def build_issues(pe: PEImage,
                  function_symbols: Dict[str, int],
                  constants: Dict[str, int],
                  runtime_seeded_globals: Dict[int, int],
+                 runtime_initializer_copies: Dict[int, int],
                  min_address: int,
                  include_code_globals: bool,
                  include_symbolic: bool,
@@ -1442,6 +1544,25 @@ def build_issues(pe: PEImage,
     for decl in decls:
         if decl.address < min_address or decl.size is None or decl.size <= 0:
             continue
+        if decl.address in runtime_initializer_copies:
+            expected_source = runtime_initializer_copies[decl.address]
+            actual_source = (
+                resolve_symbolic_scalar_initializer(decl.initializer, constants, data_symbols)
+                if decl.initializer is not None
+                else None
+            )
+            if actual_source != expected_source:
+                actual_text = "none" if actual_source is None else f"0x{actual_source:08x}"
+                issues.append(Issue(
+                    "RUNTIME_INIT_SOURCE_MISMATCH",
+                    decl.address,
+                    decl.name,
+                    decl.line,
+                    decl.size,
+                    b"",
+                    None,
+                    f"expected dynamic initializer source 0x{expected_source:08x}; got {actual_text}",
+                ))
         original = pe.read(decl.address, decl.size)
         if original is None:
             continue
@@ -1525,6 +1646,10 @@ def format_report(summary: GlobalsAuditSummary) -> str:
     lines.append(f"  definitions:  {total_defs}")
     lines.append(f"  issues:       {len(issues)}")
     lines.append(f"  warnings:     {len(address_warnings)}")
+    if args.min_address or args.max_address is not None or args.issue_kinds:
+        max_address = "none" if args.max_address is None else f"0x{args.max_address:08x}"
+        issue_kinds = ",".join(sorted(args.issue_kinds)) if args.issue_kinds else "all"
+        lines.append(f"  filters:      min=0x{args.min_address:08x} max={max_address} kinds={issue_kinds}")
     if not args.no_auto_complete_global_effects:
         lines.append(
             "  auto-complete global side effects: "
@@ -1600,6 +1725,16 @@ def require_path(path: str | None, label: str) -> str:
     return path
 
 
+def normalize_issue_kinds(values: Sequence[str]) -> frozenset[str]:
+    kinds: set[str] = set()
+    for value in values:
+        for part in value.split(","):
+            kind = part.strip().upper().replace("-", "_")
+            if kind:
+                kinds.add(kind)
+    return frozenset(kinds)
+
+
 def resolve_audit_inputs(config: dict[str, Any], target: ProjectTarget, options: GlobalsAuditOptions) -> GlobalsAuditInputs:
     globals_config = get_section(config, "globals")
     min_address = options.min_address
@@ -1607,6 +1742,8 @@ def resolve_audit_inputs(config: dict[str, Any], target: ProjectTarget, options:
         min_address = parse_int(globals_config["min_address"], "globals.min_address")
     if min_address is None:
         min_address = 0
+    if options.max_address is not None and options.max_address < min_address:
+        raise ConfigError("--max-address must be greater than or equal to --min-address")
 
     auto_complete = options.auto_complete or target.auto_complete
     if auto_complete is None and target.source_dirs:
@@ -1624,6 +1761,8 @@ def resolve_audit_inputs(config: dict[str, Any], target: ProjectTarget, options:
         auto_complete=auto_complete,
         data_sections=options.data_sections,
         min_address=min_address,
+        max_address=options.max_address,
+        issue_kinds=normalize_issue_kinds(options.issue_kinds),
         max_issues=options.max_issues,
         max_auto_facts=options.max_auto_facts,
         auto_complete_max_function_bytes=options.auto_complete_max_function_bytes,
@@ -1643,6 +1782,7 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
     inputs = resolve_audit_inputs(config, target, options)
     globals_config = get_section(config, "globals")
     runtime_seeded_globals = configure_globals(globals_config)
+    runtime_initializer_copies = runtime_initializer_copy_map(globals_config)
     constants = parse_defines([inputs.globals_h, *inputs.define_headers])
     pe = PEImage(inputs.exe)
     address_warnings: List[AddressWarning] = []
@@ -1654,8 +1794,13 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
     issues = build_issues(pe, decls, header_decls, code_globals, function_symbols,
                           constants,
                           runtime_seeded_globals,
+                          runtime_initializer_copies,
                           inputs.min_address, inputs.include_code_globals, inputs.include_symbolic,
                           not inputs.no_source_order, inputs.source_order_all)
+    if inputs.max_address is not None:
+        issues = [issue for issue in issues if issue.address <= inputs.max_address]
+    if inputs.issue_kinds:
+        issues = [issue for issue in issues if issue.category in inputs.issue_kinds]
     auto_reviewed = reviewed_auto_complete_map(config, target.name)
     auto_results = build_auto_complete_global_effects(pe, decls, config, target.name, inputs)
     return GlobalsAuditSummary(

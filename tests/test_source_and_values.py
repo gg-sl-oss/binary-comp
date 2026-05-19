@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import pytest
 
-from binary_comp.analyzers.calls import normalize_compiled
+from binary_comp.analyzers.calls import (
+    auto_detect_named_functions,
+    build_same_address_aliases,
+    canonicalize,
+    extract_calls_from_compiled,
+    extract_calls_from_original,
+    load_calls_policy,
+    normalize_compiled,
+    parse_vtable_call,
+    policy_with_same_address_aliases,
+    resolve_original_call,
+)
 from binary_comp.analyzers.values import (
     CheckResult,
     ValuesOptions,
@@ -53,6 +64,127 @@ def test_msvc_member_name_can_use_configured_signature():
     symbol = "?Take@Box@@QAEPAVItem@@PAV2@@Z"
 
     assert normalize_compiled(symbol, frozenset({"Box::Take"})) == "Box::Take(Item*)"
+
+
+def test_call_policy_auto_aliases_same_original_address(tmp_path):
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "a.cpp").write_text(
+        "/* Function start: 0x00401000 */\nvoid Alpha() {}\n",
+        encoding="utf-8",
+    )
+    (source_dir / "b.cpp").write_text(
+        "/* Function start: 0x00401000 */\nvoid Beta() {}\n",
+        encoding="utf-8",
+    )
+    target = ProjectTarget(
+        name="full",
+        original_exe="",
+        rebuilt_exe="",
+        map_path="",
+        source_dirs=(str(source_dir),),
+    )
+    policy = load_calls_policy({})
+
+    assert build_same_address_aliases(target, policy) == {"Alpha": "Beta"}
+
+    effective = policy_with_same_address_aliases(target, policy)
+
+    assert canonicalize("Alpha", effective) == "Beta"
+
+
+def test_call_address_map_uses_named_disassembly_headers(tmp_path):
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "FUN_00401000.disassembled.txt").write_text(
+        "Function: NamedHelper\nAddress: 0x401000\n\nRET\n",
+        encoding="utf-8",
+    )
+
+    detected = auto_detect_named_functions(str(code_dir))
+
+    assert detected[0x401000] == "NamedHelper"
+
+
+def test_named_disassembly_header_resolves_only_when_compiled_target_matches():
+    policy = load_calls_policy({"calls": {"canonical_aliases": {"ThunkHelper": "RealHelper"}}})
+
+    assert resolve_original_call(
+        0x401000,
+        {},
+        {0x401000: "ThunkHelper"},
+        frozenset({"RealHelper"}),
+        policy,
+    ) == "ThunkHelper"
+    assert resolve_original_call(
+        0x401010,
+        {},
+        {0x401010: "UnrelatedHelper"},
+        frozenset({"RealHelper"}),
+        policy,
+    ) == "FUN_00401010"
+
+
+def test_stack_indirect_calls_are_not_vtable_calls(tmp_path):
+    policy = load_calls_policy({})
+
+    assert parse_vtable_call("CALL dword ptr [ESP + 0x28]", policy) == "__indirect__"
+    assert parse_vtable_call("CALL dword ptr [EAX + 0x28]", policy) == "vtable[0x28]"
+
+    asm_path = tmp_path / "stack-callback.asm"
+    asm_path.write_text(
+        """
+_TEXT SEGMENT
+?Run@@YAXXZ PROC NEAR ; Run, COMDAT
+    call DWORD PTR _cmpFunc$[esp+20]
+?Run@@YAXXZ ENDP
+_TEXT ENDS
+""",
+        encoding="utf-8",
+    )
+
+    assert extract_calls_from_compiled(str(asm_path), "Run") == ["__indirect__"]
+
+
+def test_original_tail_jump_to_known_pointer_counts_as_call(tmp_path):
+    policy = load_calls_policy({
+        "calls": {
+            "function_pointer_globals": {
+                "0x004B84F4": "GetTickCount",
+            },
+        },
+    })
+    disasm_path = tmp_path / "tail.disassembled.txt"
+    disasm_path.write_text(
+        """
+Function: TailThunk
+Address: 0x401000
+
+JMP dword ptr [0x004b84f4]
+JMP      LAB_00401020
+""",
+        encoding="utf-8",
+    )
+
+    assert extract_calls_from_original(str(disasm_path), policy) == ["GetTickCount"]
+
+
+def test_compiled_tail_jump_to_vtable_counts_as_call(tmp_path):
+    asm_path = tmp_path / "tail-vtable.asm"
+    asm_path.write_text(
+        """
+_TEXT SEGMENT
+?Run@@YAXXZ PROC NEAR ; Run, COMDAT
+    jmp DWORD PTR [eax+148]
+    jmp DWORD PTR $L2[eax*4]
+    jmp SHORT $L1
+?Run@@YAXXZ ENDP
+_TEXT ENDS
+""",
+        encoding="utf-8",
+    )
+
+    assert extract_calls_from_compiled(str(asm_path), "Run") == ["vtable[0x94]"]
 
 
 def test_source_groups_map_to_rebuilt_symbols(fixture_root):

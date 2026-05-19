@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import struct
+import sys
 from pathlib import Path
 
 import pytest
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "project"
 IMAGE_BASE = 0x00400000
@@ -20,7 +24,8 @@ def write_tiny_pe(
     function_bytes = function_bytes or b"\xB8\x07\x00\x00\x00\x83\xF8\x07\xC3"
     text = bytearray(b"\x90" * 0x200)
     text[:len(function_bytes)] = function_bytes
-    text[0x10] = 0xC3
+    if len(function_bytes) <= 0x10:
+        text[0x10] = 0xC3
 
     data = bytearray(0x600)
     pe_offset = 0x80

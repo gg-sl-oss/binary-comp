@@ -606,6 +606,66 @@ def is_stack_adjustment(instr: Instruction) -> bool:
     return instr.operands[0].kind == "reg" and instr.operands[0].reg == "esp"
 
 
+def direct_jump_target(instr: Instruction) -> int | None:
+    if instr.mnemonic != "jmp" or len(instr.operands) != 1:
+        return None
+    operand = instr.operands[0]
+    if operand.kind != "imm":
+        return None
+    return unsigned32(operand.imm)
+
+
+def call_signature(instr: Instruction) -> tuple | None:
+    if instr.mnemonic != "call" or len(instr.operands) != 1:
+        return None
+    operand = instr.operands[0]
+    if operand.kind == "mem":
+        return ("mem", operand.index, operand.scale, operand.disp)
+    if operand.kind == "imm":
+        return ("direct",)
+    return None
+
+
+def following_call_signature(instrs: list[Instruction], idx: int, max_steps: int = 48) -> tuple | None:
+    by_addr = {instr.address: pos for pos, instr in enumerate(instrs)}
+    seen: set[int] = set()
+    pos = idx + 1
+    steps = 0
+    while 0 <= pos < len(instrs) and steps < max_steps:
+        if pos in seen:
+            return None
+        seen.add(pos)
+        steps += 1
+
+        instr = instrs[pos]
+        signature = call_signature(instr)
+        if signature is not None:
+            return signature
+        if instr.mnemonic == "ret":
+            return None
+        if instr.mnemonic == "jmp":
+            target = direct_jump_target(instr)
+            if target is None or target not in by_addr:
+                return None
+            pos = by_addr[target]
+            continue
+        if is_branch_or_call(instr.mnemonic):
+            return None
+        pos += 1
+    return None
+
+
+def different_following_call(
+    compiled_instrs: list[Instruction],
+    original_instrs: list[Instruction],
+    ci: int,
+    oi: int,
+) -> bool:
+    c_sig = following_call_signature(compiled_instrs, ci)
+    o_sig = following_call_signature(original_instrs, oi)
+    return c_sig is not None and o_sig is not None and c_sig != o_sig
+
+
 def report_string_mismatch(
     compiled_instrs: list[Instruction],
     original_instrs: list[Instruction],
@@ -663,6 +723,8 @@ def compare_instruction_pair(
     if compiled.mnemonic not in context.policy.value_mnemonics:
         return warnings
     if not comparable_operands(compiled, original):
+        return warnings
+    if compiled.mnemonic == "push" and different_following_call(compiled_instrs, original_instrs, ci, oi):
         return warnings
 
     c_imms = dict(immediate_operands(compiled))

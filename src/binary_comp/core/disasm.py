@@ -193,6 +193,7 @@ def switch_jump_table_ranges(
         if table_end is not None:
             ranges.append((table_start, table_end))
 
+    ranges.extend(switch_byte_map_ranges(instrs, func_start, func_end))
     return merge_ranges(ranges)
 
 
@@ -212,6 +213,89 @@ def switch_jump_table_end(image: PEImage, table_start: int, func_start: int, fun
     if entries == 0:
         return None
     return cursor
+
+
+def full_register_name(reg: str) -> str:
+    aliases = {
+        "al": "eax", "ah": "eax", "ax": "eax",
+        "bl": "ebx", "bh": "ebx", "bx": "ebx",
+        "cl": "ecx", "ch": "ecx", "cx": "ecx",
+        "dl": "edx", "dh": "edx", "dx": "edx",
+    }
+    return aliases.get(reg, reg)
+
+
+def switch_map_source_register(operand: Operand) -> str | None:
+    if operand.kind != "mem":
+        return None
+    if operand.index and operand.scale not in (0, 1):
+        return None
+    if operand.base and operand.index:
+        return None
+    return full_register_name(operand.base or operand.index)
+
+
+def previous_cmp_upper_bound(instrs: list[Instruction], idx: int, reg: str) -> int | None:
+    for j in range(idx - 1, max(-1, idx - 8), -1):
+        instr = instrs[j]
+        if instr.mnemonic != "cmp" or len(instr.operands) < 2:
+            continue
+        left, right = instr.operands[0], instr.operands[1]
+        if left.kind != "reg" or full_register_name(left.reg) != reg:
+            continue
+        if right.kind != "imm" or right.imm < 0:
+            continue
+        return right.imm
+    return None
+
+
+def following_indirect_jump_uses(instrs: list[Instruction], idx: int, reg: str) -> bool:
+    for j in range(idx + 1, min(len(instrs), idx + 5)):
+        instr = instrs[j]
+        if instr.mnemonic != "jmp" or len(instr.operands) != 1:
+            continue
+        operand = instr.operands[0]
+        if operand.kind == "mem" and operand.index == reg and operand.scale == 4:
+            return True
+    return False
+
+
+def switch_byte_map_ranges(
+    instrs: list[Instruction],
+    func_start: int,
+    func_end: int,
+) -> tuple[tuple[int, int], ...]:
+    """Find MSVC byte dispatch maps used before indirect switch jump tables."""
+    ranges: list[tuple[int, int]] = []
+    for idx, instr in enumerate(instrs):
+        if instr.mnemonic not in {"mov", "movzx"} or len(instr.operands) < 2:
+            continue
+
+        dst, src = instr.operands[0], instr.operands[1]
+        if dst.kind != "reg" or src.kind != "mem" or src.size != 1:
+            continue
+
+        table_start = unsigned32(src.disp)
+        if not (func_start <= table_start < func_end):
+            continue
+
+        source_reg = switch_map_source_register(src)
+        if source_reg is None:
+            continue
+
+        jump_reg = full_register_name(dst.reg)
+        if not following_indirect_jump_uses(instrs, idx, jump_reg):
+            continue
+
+        upper_bound = previous_cmp_upper_bound(instrs, idx, source_reg)
+        if upper_bound is None:
+            continue
+
+        table_end = table_start + upper_bound + 1
+        if table_start < table_end <= func_end:
+            ranges.append((table_start, table_end))
+
+    return tuple(ranges)
 
 
 def merge_ranges(ranges: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:

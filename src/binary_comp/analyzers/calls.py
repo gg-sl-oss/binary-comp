@@ -8,7 +8,7 @@ import re
 import struct
 import subprocess
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
@@ -127,7 +127,50 @@ def canonicalize(name: str, policy: CallsPolicy, strict_memory: bool = False) ->
         name = name.upper()
     if strict_memory and name in policy.strict_memory_tokens:
         return name
-    return policy.canonical_aliases.get(name, name)
+    seen = set()
+    while name in policy.canonical_aliases and name not in seen:
+        seen.add(name)
+        name = policy.canonical_aliases[name]
+        if name.startswith("FUN_"):
+            name = name.upper()
+        if strict_memory and name in policy.strict_memory_tokens:
+            return name
+    return name
+
+
+def iter_source_address_names(target: ProjectTarget, policy: CallsPolicy):
+    for cpp_file in iter_cpp_files(target.source_dirs, target.map_skip):
+        for addrs, func_name in iter_source_functions(cpp_file, policy, include_no_assembly=True):
+            for addr in addrs:
+                yield addr, func_name
+
+
+def build_same_address_aliases(target: ProjectTarget, policy: CallsPolicy) -> dict[str, str]:
+    names_by_addr: dict[int, list[str]] = {}
+    for addr, func_name in iter_source_address_names(target, policy):
+        names = names_by_addr.setdefault(addr, [])
+        if func_name not in names:
+            names.append(func_name)
+
+    aliases = {}
+    for names in names_by_addr.values():
+        if len(names) < 2:
+            continue
+        canonical = canonicalize(names[-1], policy)
+        for name in names:
+            if name != canonical:
+                aliases[name] = canonical
+    return aliases
+
+
+def policy_with_same_address_aliases(target: ProjectTarget, policy: CallsPolicy) -> CallsPolicy:
+    same_address_aliases = build_same_address_aliases(target, policy)
+    if not same_address_aliases:
+        return policy
+    return replace(
+        policy,
+        canonical_aliases={**same_address_aliases, **policy.canonical_aliases},
+    )
 
 
 def apply_call_count_allowances(func_name: str, only_orig: Counter, only_compiled: Counter, policy: CallsPolicy) -> None:
@@ -205,17 +248,55 @@ def auto_detect_crt(code_dir: str) -> dict[int, str]:
     return crt_map
 
 
+def auto_detect_named_functions(code_dir: str) -> dict[int, str]:
+    named_functions = dict(auto_detect_crt(code_dir))
+    for disassembled in glob.glob(os.path.join(code_dir, "FUN_*.disassembled.txt")):
+        match = re.match(r"FUN_([0-9a-fA-F]+)\.disassembled\.txt", os.path.basename(disassembled))
+        if not match:
+            continue
+        addr = int(match.group(1), 16)
+        try:
+            with open(disassembled, "r", encoding="utf-8", errors="ignore") as f:
+                header = f.readline()
+        except OSError:
+            continue
+        name_match = re.match(r"Function:\s*(.+?)\s*$", header)
+        if not name_match:
+            continue
+        name = name_match.group(1).strip()
+        if not name or name.startswith("FUN_"):
+            continue
+        named_functions.setdefault(addr, name)
+    return named_functions
+
+
 def build_address_to_name_map(target: ProjectTarget, policy: CallsPolicy) -> dict[int, str]:
     addr_map = dict(policy.known_crt.get(target.name, {}))
     if target.code_dir:
         for addr, name in auto_detect_crt(target.code_dir).items():
             addr_map.setdefault(addr, name)
 
-    for cpp_file in iter_cpp_files(target.source_dirs, target.map_skip):
-        for addrs, func_name in iter_source_functions(cpp_file, policy, include_no_assembly=True):
-            for addr in addrs:
-                addr_map[addr] = func_name
+    for addr, func_name in iter_source_address_names(target, policy):
+        addr_map[addr] = func_name
     return addr_map
+
+
+def resolve_original_call(
+    call: str | int,
+    addr_map: dict[int, str],
+    named_addr_map: dict[int, str],
+    compiled_targets: frozenset[str],
+    policy: CallsPolicy,
+    strict_memory: bool = False,
+) -> str:
+    if not isinstance(call, int):
+        return call
+    if call in addr_map:
+        return addr_map[call]
+    candidate = named_addr_map.get(call)
+    if candidate and canonicalize(candidate, policy, strict_memory=strict_memory) in compiled_targets:
+        return candidate
+    return f"FUN_{call:08X}"
 
 
 def parse_c_string(data: bytes, offset: int) -> str:
@@ -321,7 +402,7 @@ def is_iat_address(addr: int) -> bool:
 
 
 def parse_vtable_call(line: str, policy: CallsPolicy) -> str | None:
-    match = re.match(r"CALL\s+dword\s+ptr\s*\[\s*(?:0x)?([0-9a-fA-F]+)\s*\]", line, re.IGNORECASE)
+    match = re.match(r"(?:CALL|JMP)\s+dword\s+ptr\s*\[\s*(?:0x)?([0-9a-fA-F]+)\s*\]", line, re.IGNORECASE)
     if match:
         try:
             addr = int(match.group(1), 16)
@@ -335,16 +416,22 @@ def parse_vtable_call(line: str, policy: CallsPolicy) -> str | None:
             pass
 
     match = re.match(
-        r"CALL\s+dword\s+ptr\s*\[\s*(\w+)\s*(?:\+\s*(?:0x)?([0-9a-fA-F]+))?\s*\]",
+        r"(?:CALL|JMP)\s+dword\s+ptr\s*\[\s*(\w+)\s*(?:\+\s*(?:0x)?([0-9a-fA-F]+))?\s*\]",
         line,
         re.IGNORECASE,
     )
     if match:
+        base = match.group(1).upper()
+        if base == "ESP":
+            return "__indirect__"
         offset = int(match.group(2), 16) if match.group(2) else 0
         return f"vtable[0x{offset:x}]"
 
-    match = re.match(r"call\s+DWORD\s+PTR\s*\[\s*(\w+)\s*(?:\+\s*(\d+))?\s*\]", line, re.IGNORECASE)
+    match = re.match(r"(?:call|jmp)\s+DWORD\s+PTR\s*\[\s*(\w+)\s*(?:\+\s*(\d+))?\s*\]", line, re.IGNORECASE)
     if match:
+        base = match.group(1).upper()
+        if base == "ESP":
+            return "__indirect__"
         offset = int(match.group(2)) if match.group(2) else 0
         return f"vtable[0x{offset:x}]"
     return None
@@ -357,7 +444,7 @@ def extract_calls_from_original(disasm_path: str, policy: CallsPolicy) -> list[s
         r"MOV\s+(E[A-D]X|ESI|EDI|EBP)\s*,\s*dword\s+ptr\s*\[\s*(?:0x)?([0-9a-fA-F]+)\s*\]",
         re.IGNORECASE,
     )
-    call_reg_re = re.compile(r"CALL\s+(E[A-D]X|ESI|EDI|EBP)\s*$", re.IGNORECASE)
+    call_reg_re = re.compile(r"(CALL|JMP)\s+(E[A-D]X|ESI|EDI|EBP)\s*$", re.IGNORECASE)
     try:
         with open(disasm_path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
@@ -374,17 +461,26 @@ def extract_calls_from_original(disasm_path: str, policy: CallsPolicy) -> list[s
                         reg_map.pop(moved.group(1).upper(), None)
                     continue
 
-                if not line.upper().startswith("CALL"):
+                upper_line = line.upper()
+                is_call = upper_line.startswith("CALL")
+                is_jump = upper_line.startswith("JMP")
+                if not is_call and not is_jump:
                     continue
 
                 call_reg = call_reg_re.match(line)
                 if call_reg:
-                    calls.append(reg_map.get(call_reg.group(1).upper(), "__indirect__"))
+                    reg = call_reg.group(2).upper()
+                    if is_jump and reg not in reg_map:
+                        continue
+                    calls.append(reg_map.get(reg, "__indirect__"))
                     continue
 
                 vtable = parse_vtable_call(line, policy)
                 if vtable:
                     calls.append(vtable)
+                    continue
+
+                if is_jump:
                     continue
 
                 match = re.match(r"CALL\s+(?:0x)?0*([0-9a-fA-F]+)\s*$", line)
@@ -515,17 +611,26 @@ def extract_calls_from_compiled(
             name = normalize_import_name(moved.group(2))
             compiled_reg_map[moved.group(1).lower()] = name if name in known_imports else "__import__"
             continue
-        if not line.lower().startswith("call"):
+        lower_line = line.lower()
+        is_call = lower_line.startswith("call")
+        is_jump = lower_line.startswith("jmp")
+        if not is_call and not is_jump:
             continue
 
-        full_target = line[4:].strip()
+        full_target = line[4 if is_call else 3:].strip()
         match = re.match(r"DWORD\s+PTR\s*\[\s*(\w+)\s*(?:\+\s*(\d+))?\s*\]", full_target, re.IGNORECASE)
         if match:
+            base = match.group(1).lower()
+            if base == "esp":
+                calls.append("__indirect__")
+                continue
             offset = int(match.group(2)) if match.group(2) else 0
             calls.append(f"vtable[0x{offset:x}]")
             continue
 
         if full_target in ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp"):
+            if is_jump and full_target not in compiled_reg_map:
+                continue
             calls.append(compiled_reg_map.get(full_target, "__indirect__"))
             continue
 
@@ -541,8 +646,16 @@ def extract_calls_from_compiled(
 
         match = re.match(r"DWORD\s+PTR\s+(.+)", full_target, re.IGNORECASE)
         if match:
+            if is_jump:
+                continue
             pointer_expr = match.group(1).split(";", 1)[0].strip()
+            if re.search(r"\[\s*(?:e[bs]p)\s*(?:[+\-]\s*\d+)?\s*\]", pointer_expr, re.IGNORECASE):
+                calls.append("__indirect__")
+                continue
             calls.append(f"DWORD PTR {pointer_expr}" if "$[" in pointer_expr else pointer_expr)
+            continue
+
+        if is_jump:
             continue
 
         target_symbol = full_target.split(";", 1)[0].strip()
@@ -654,6 +767,7 @@ def check_calls(config: dict[str, Any], target: ProjectTarget, options: CallsOpt
         if not path or not os.path.isdir(path):
             raise FileNotFoundError(f"missing {label}: {path}")
 
+    policy = policy_with_same_address_aliases(target, policy)
     functions, skipped_no_disasm = select_functions(target, options, policy)
     if not functions:
         raise RuntimeError("no functions selected for verification")
@@ -670,6 +784,7 @@ def check_calls(config: dict[str, Any], target: ProjectTarget, options: CallsOpt
     IAT_ADDRESSES.update(policy.iat_addresses)
 
     addr_map = build_address_to_name_map(target, policy)
+    named_addr_map = auto_detect_named_functions(target.code_dir) if target.code_dir else {}
     total_checked = 0
     mismatches = []
 
@@ -687,15 +802,26 @@ def check_calls(config: dict[str, Any], target: ProjectTarget, options: CallsOpt
             continue
         total_checked += 1
 
-        orig_resolved = [
-            addr_map.get(call, f"FUN_{call:08X}") if isinstance(call, int) else call
-            for call in orig_raw
-        ]
         compiled_resolved = [
             normalize_compiled(name, policy.signature_overloads)
             if not name.startswith("vtable[") and not name.startswith("__")
             else name
             for name in compiled_raw
+        ]
+        compiled_targets = frozenset(
+            canonicalize(name, policy, strict_memory=options.strict_memory)
+            for name in compiled_resolved
+        )
+        orig_resolved = [
+            resolve_original_call(
+                call,
+                addr_map,
+                named_addr_map,
+                compiled_targets,
+                policy,
+                strict_memory=options.strict_memory,
+            )
+            for call in orig_raw
         ]
         orig_canon = [canonicalize(name, policy, strict_memory=options.strict_memory) for name in orig_resolved]
         compiled_canon = [canonicalize(name, policy, strict_memory=options.strict_memory) for name in compiled_resolved]
