@@ -195,7 +195,7 @@ def add_globals_parser(subparsers) -> None:
     parser.add_argument("--source-order-all", action="store_true",
                         help="Warn on source-order decreases for initialized globals too")
     parser.add_argument("--check-rebuilt-layout", action="store_true",
-                        help="Report overlapping source globals whose rebuilt MAP symbols are split apart")
+                        help="Report original-contiguous or overlapping source globals whose rebuilt MAP symbols are split apart")
     parser.add_argument("--fail-on-issues", action="store_true", help="Exit 1 when suspicious issues are found")
     parser.add_argument("--fail-on-warnings", action="store_true",
                         help="Exit 1 when globals without address annotations are found")

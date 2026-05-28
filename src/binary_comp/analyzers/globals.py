@@ -130,6 +130,14 @@ class AutoGlobalFact:
 
 
 @dataclass
+class LayoutSensitiveUse:
+    name: str
+    path: str
+    line: int
+    context: str
+
+
+@dataclass
 class GlobalsAuditOptions:
     globals_source: str | None = None
     globals_header: str | None = None
@@ -160,6 +168,8 @@ class GlobalsAuditOptions:
 class GlobalsAuditInputs:
     exe: str
     map_path: str
+    source_dirs: tuple[str, ...]
+    source_excludes: tuple[str, ...]
     globals_source: str
     globals_h: str | None
     code_globals_h: str | None
@@ -1528,9 +1538,184 @@ def rebuilt_va_for_decl(decl: GlobalDecl,
     return None
 
 
+ADDRESS_OF_NAME_RE = re.compile(r"&\s*([A-Za-z_][A-Za-z0-9_]*)")
+POINTER_CAST_RE = re.compile(r"\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*\*\s*\)")
+INT_LITERAL_RE = re.compile(r"0[xX][0-9A-Fa-f]+|\d+")
+
+
+def iter_source_scan_files(source_dirs: Sequence[str],
+                           source_excludes: Sequence[str]) -> Iterable[str]:
+    suffixes = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
+    excludes = tuple(source_excludes)
+    for source_dir in source_dirs:
+        if not source_dir or not os.path.isdir(source_dir):
+            continue
+        for root, dirs, files in os.walk(source_dir):
+            if excludes and any(exclude and exclude in root for exclude in excludes):
+                dirs[:] = []
+                continue
+            for filename in files:
+                if not filename.endswith(suffixes):
+                    continue
+                path = os.path.join(root, filename)
+                if excludes and any(exclude and exclude in path for exclude in excludes):
+                    continue
+                yield path
+
+
+def mask_comments_for_layout_scan(text: str) -> str:
+    chars = list(text)
+    i = 0
+    in_string: str | None = None
+    while i < len(chars):
+        c = chars[i]
+        if in_string is not None:
+            if c == "\\":
+                i += 2
+                continue
+            if c == in_string:
+                in_string = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            in_string = c
+            i += 1
+            continue
+        if c == "/" and i + 1 < len(chars) and chars[i + 1] == "/":
+            chars[i] = chars[i + 1] = " "
+            i += 2
+            while i < len(chars) and chars[i] != "\n":
+                chars[i] = " "
+                i += 1
+            continue
+        if c == "/" and i + 1 < len(chars) and chars[i + 1] == "*":
+            chars[i] = chars[i + 1] = " "
+            i += 2
+            while i + 1 < len(chars) and not (chars[i] == "*" and chars[i + 1] == "/"):
+                if chars[i] != "\n":
+                    chars[i] = " "
+                i += 1
+            if i + 1 < len(chars):
+                chars[i] = chars[i + 1] = " "
+                i += 2
+            continue
+        i += 1
+    return "".join(chars)
+
+
+def statement_tail(text: str, start: int) -> str:
+    end = len(text)
+    for delimiter in ("\n", ";", ","):
+        candidate = text.find(delimiter, start)
+        if candidate >= 0:
+            end = min(end, candidate)
+    return text[start:end]
+
+
+def is_layout_sensitive_address_tail(tail: str) -> bool:
+    tail = tail[:160]
+    return bool(re.match(r"\s*\)*\s*(?:\+|-|\[)", tail))
+
+
+def parse_int_literal(text: str) -> Optional[int]:
+    if not INT_LITERAL_RE.fullmatch(text.strip()):
+        return None
+    try:
+        return int(text, 0)
+    except ValueError:
+        return None
+
+
+def access_size_from_pointer_casts(prefix: str) -> Optional[int]:
+    matches = list(POINTER_CAST_RE.finditer(prefix))
+    if not matches:
+        return None
+    for match in matches:
+        size = base_type_size(match.group(1))
+        if size is not None and size != 1:
+            return size
+    return base_type_size(matches[-1].group(1))
+
+
+def layout_use_is_provably_in_bounds(text: str, match, decl: GlobalDecl) -> bool:
+    if decl.size is None or decl.size <= 0:
+        return False
+
+    prefix = text[max(0, match.start() - 160):match.start()]
+    tail = statement_tail(text, match.end())[:160]
+    access_size = access_size_from_pointer_casts(prefix) or base_type_size(decl.type_text) or 1
+
+    subscript_match = re.match(r"\s*\)*\s*\[\s*({})\s*\]".format(INT_LITERAL_RE.pattern), tail)
+    if subscript_match:
+        index = parse_int_literal(subscript_match.group(1))
+        if index is None:
+            return False
+        offset = index * access_size
+        return 0 <= offset and offset + access_size <= decl.size
+
+    offset_match = re.match(r"\s*\)*\s*([+-])\s*({})\b".format(INT_LITERAL_RE.pattern), tail)
+    if offset_match:
+        offset = parse_int_literal(offset_match.group(2))
+        if offset is None:
+            return False
+        if offset_match.group(1) == "-":
+            offset = -offset
+        return 0 <= offset and offset + access_size <= decl.size
+
+    return False
+
+
+def layout_use_context(text: str, start: int, end: int) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end < 0:
+        line_end = len(text)
+    context = text[line_start:line_end].strip()
+    if len(context) > 140:
+        context = context[:137] + "..."
+    return context
+
+
+def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
+                                      source_excludes: Sequence[str],
+                                      decls_by_name: dict[str, GlobalDecl],
+                                      ignored_paths: Sequence[str] = ()) -> dict[str, LayoutSensitiveUse]:
+    ignored = {os.path.abspath(path) for path in ignored_paths if path}
+    uses: dict[str, LayoutSensitiveUse] = {}
+    if not decls_by_name:
+        return uses
+
+    for path in iter_source_scan_files(source_dirs, source_excludes):
+        if os.path.abspath(path) in ignored:
+            continue
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        masked = mask_comments_for_layout_scan(text)
+        for match in ADDRESS_OF_NAME_RE.finditer(masked):
+            name = match.group(1)
+            decl = decls_by_name.get(name)
+            if decl is None or name in uses:
+                continue
+            tail = statement_tail(masked, match.end())
+            if not is_layout_sensitive_address_tail(tail):
+                continue
+            if layout_use_is_provably_in_bounds(masked, match, decl):
+                continue
+            uses[name] = LayoutSensitiveUse(
+                name=name,
+                path=path,
+                line=masked.count("\n", 0, match.start()) + 1,
+                context=layout_use_context(text, match.start(), match.end()),
+            )
+    return uses
+
+
 def build_rebuilt_layout_issues(decls: List[GlobalDecl],
                                 map_path: str,
-                                min_address: int) -> List[Issue]:
+                                min_address: int,
+                                source_dirs: Sequence[str] = (),
+                                source_excludes: Sequence[str] = (),
+                                ignored_source_paths: Sequence[str] = ()) -> List[Issue]:
     exact, by_address = rebuilt_symbol_indexes(map_path)
     if not by_address:
         return []
@@ -1568,6 +1753,45 @@ def build_rebuilt_layout_issues(decls: List[GlobalDecl],
                 b"",
                 None,
                 f"covers {other.name} at 0x{other.address:08x} (+0x{offset:x}), "
+                f"but rebuilt symbols are 0x{decl_rebuilt:08x} and 0x{other_rebuilt:08x}; "
+                f"expected 0x{expected:08x}",
+            ))
+
+    if source_dirs:
+        scalar_decls = {
+            decl.name: decl for decl in by_addr
+            if not decl.dims and "*" not in normalize_type(decl.type_text) and decl.size is not None and decl.size > 0
+        }
+        layout_uses = find_layout_sensitive_global_uses(
+            source_dirs,
+            source_excludes,
+            scalar_decls,
+            ignored_source_paths,
+        )
+        for i, decl in enumerate(by_addr[:-1]):
+            if decl.address < min_address or decl.size is None or decl.size <= 0 or decl.name not in layout_uses:
+                continue
+            other = by_addr[i + 1]
+            if other.address < min_address or other.address != decl.address + decl.size:
+                continue
+            decl_rebuilt = rebuilt_va_for_decl(decl, exact, by_address)
+            other_rebuilt = rebuilt_va_for_decl(other, exact, by_address)
+            if decl_rebuilt is None or other_rebuilt is None:
+                continue
+            expected = decl_rebuilt + decl.size
+            if other_rebuilt == expected:
+                continue
+            use = layout_uses[decl.name]
+            issues.append(Issue(
+                "REBUILT_LAYOUT_ADJACENT_SPLIT",
+                decl.address,
+                decl.name,
+                decl.line,
+                decl.size,
+                b"",
+                None,
+                f"layout-sensitive use at {use.path}:{use.line}: {use.context}; "
+                f"next original global is {other.name} at 0x{other.address:08x}, "
                 f"but rebuilt symbols are 0x{decl_rebuilt:08x} and 0x{other_rebuilt:08x}; "
                 f"expected 0x{expected:08x}",
             ))
@@ -1838,6 +2062,8 @@ def resolve_audit_inputs(config: dict[str, Any], target: ProjectTarget, options:
     return GlobalsAuditInputs(
         exe=target.original_exe,
         map_path=target.map_path,
+        source_dirs=target.source_dirs,
+        source_excludes=target.source_excludes,
         globals_source=require_path(options.globals_source or target.globals_source, "globals_source"),
         globals_h=options.globals_header or target.globals_header,
         code_globals_h=options.code_globals_header or target.code_globals_header,
@@ -1884,7 +2110,14 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
                           inputs.min_address, inputs.include_code_globals, inputs.include_symbolic,
                           not inputs.no_source_order, inputs.source_order_all)
     if inputs.check_rebuilt_layout:
-        issues.extend(build_rebuilt_layout_issues(decls, inputs.map_path, inputs.min_address))
+        issues.extend(build_rebuilt_layout_issues(
+            decls,
+            inputs.map_path,
+            inputs.min_address,
+            inputs.source_dirs or (os.path.dirname(inputs.globals_source) or ".",),
+            inputs.source_excludes,
+            (inputs.globals_source, inputs.globals_h or ""),
+        ))
         issues.sort(key=lambda x: (x.address, x.category, x.name))
     if inputs.max_address is not None:
         issues = [issue for issue in issues if issue.address <= inputs.max_address]

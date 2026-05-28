@@ -150,6 +150,99 @@ def test_rebuilt_layout_check_reports_split_overlapping_globals(tmp_path):
     assert "expected 0x00406004" in issues[0].detail
 
 
+def test_rebuilt_layout_check_reports_split_adjacent_globals_used_as_layout_base(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(
+        " 0003:00000000       _DAT_00402000      00406000     <common>\n"
+        " 0003:00000010       _DAT_00402002      00406100     <common>\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "activity.cpp").write_text(
+        "extern short DAT_00402000;\n"
+        "int f(int offset) { return *(short *)((char *)&DAT_00402000 + offset); }\n",
+        encoding="utf-8",
+    )
+    first = AuditGlobalDecl(0x402000, "DAT_00402000", "", 1, "short", [], False, None, 2)
+    second = AuditGlobalDecl(0x402002, "DAT_00402002", "", 2, "short", [], False, None, 2)
+
+    issues = build_rebuilt_layout_issues([first, second], str(map_path), 0, (str(source_dir),))
+
+    assert len(issues) == 1
+    assert issues[0].category == "REBUILT_LAYOUT_ADJACENT_SPLIT"
+    assert "activity.cpp:2" in issues[0].detail
+    assert "expected 0x00406002" in issues[0].detail
+
+
+def test_rebuilt_layout_check_ignores_split_adjacent_globals_without_layout_use(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(
+        " 0003:00000000       _DAT_00402000      00406000     <common>\n"
+        " 0003:00000010       _DAT_00402002      00406100     <common>\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "activity.cpp").write_text(
+        "extern short DAT_00402000;\n"
+        "extern short DAT_00402002;\n"
+        "int f(void) { return DAT_00402000 + DAT_00402002; }\n",
+        encoding="utf-8",
+    )
+    first = AuditGlobalDecl(0x402000, "DAT_00402000", "", 1, "short", [], False, None, 2)
+    second = AuditGlobalDecl(0x402002, "DAT_00402002", "", 2, "short", [], False, None, 2)
+
+    issues = build_rebuilt_layout_issues([first, second], str(map_path), 0, (str(source_dir),))
+
+    assert issues == []
+
+
+def test_rebuilt_layout_check_ignores_pointer_global_element_address(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(
+        " 0003:00000000       _g_Items_00402000      00406000     <common>\n"
+        " 0003:00000010       _g_Timer_00402004      00406100     <common>\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "activity.cpp").write_text(
+        "struct Item { int value; };\n"
+        "extern struct Item *g_Items_00402000;\n"
+        "void render(int i) { draw(&g_Items_00402000[i]); }\n",
+        encoding="utf-8",
+    )
+    items = AuditGlobalDecl(0x402000, "g_Items_00402000", "", 1, "struct Item*", [], False, None, 4)
+    timer = AuditGlobalDecl(0x402004, "g_Timer_00402004", "", 2, "int", [], False, None, 4)
+
+    issues = build_rebuilt_layout_issues([items, timer], str(map_path), 0, (str(source_dir),))
+
+    assert issues == []
+
+
+def test_rebuilt_layout_check_ignores_constant_in_bounds_field_access(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(
+        " 0003:00000000       _DAT_00402000      00406000     <common>\n"
+        " 0003:00000010       _DAT_00402004      00406100     <common>\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "activity.cpp").write_text(
+        "extern int DAT_00402000;\n"
+        "void f(void) { ((short *)&DAT_00402000)[1] = 7; }\n",
+        encoding="utf-8",
+    )
+    first = AuditGlobalDecl(0x402000, "DAT_00402000", "", 1, "int", [], False, None, 4)
+    second = AuditGlobalDecl(0x402004, "DAT_00402004", "", 2, "int", [], False, None, 4)
+
+    issues = build_rebuilt_layout_issues([first, second], str(map_path), 0, (str(source_dir),))
+
+    assert issues == []
+
+
 def test_find_missing_globals_reports_uncovered_dwords(fixture_root, tmp_path):
     from conftest import write_tiny_pe
 
