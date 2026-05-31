@@ -175,6 +175,31 @@ def test_rebuilt_layout_check_reports_split_adjacent_globals_used_as_layout_base
     assert "expected 0x00406002" in issues[0].detail
 
 
+def test_rebuilt_layout_check_reports_split_adjacent_array_used_as_pointer_base(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(
+        " 0003:00000000       _DAT_00482780      00406000     <common>\n"
+        " 0003:00000010       _DAT_00482790      00406100     <common>\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "activity.cpp").write_text(
+        "extern short DAT_00482780[8];\n"
+        "void f(void) { short *p; int i; p = DAT_00482780; i = 3; do { p = p + 4; i = i + -1; } while (i != 0); }\n",
+        encoding="utf-8",
+    )
+    first = AuditGlobalDecl(0x482780, "DAT_00482780", "", 1, "short", ["8"], False, None, 16)
+    second = AuditGlobalDecl(0x482790, "DAT_00482790", "", 2, "short", ["4"], False, None, 8)
+
+    issues = build_rebuilt_layout_issues([first, second], str(map_path), 0, (str(source_dir),))
+
+    assert len(issues) == 1
+    assert issues[0].category == "REBUILT_LAYOUT_ADJACENT_SPLIT"
+    assert "activity.cpp:2" in issues[0].detail
+    assert "expected 0x00406010" in issues[0].detail
+
+
 def test_rebuilt_layout_check_ignores_split_adjacent_globals_without_layout_use(tmp_path):
     map_path = tmp_path / "rebuilt.map"
     map_path.write_text(
@@ -192,6 +217,50 @@ def test_rebuilt_layout_check_ignores_split_adjacent_globals_without_layout_use(
     )
     first = AuditGlobalDecl(0x402000, "DAT_00402000", "", 1, "short", [], False, None, 2)
     second = AuditGlobalDecl(0x402002, "DAT_00402002", "", 2, "short", [], False, None, 2)
+
+    issues = build_rebuilt_layout_issues([first, second], str(map_path), 0, (str(source_dir),))
+
+    assert issues == []
+
+
+def test_rebuilt_layout_check_ignores_in_bounds_array_subscript(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(
+        " 0003:00000000       _DAT_00402000      00406000     <common>\n"
+        " 0003:00000010       _DAT_00402010      00406100     <common>\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "activity.cpp").write_text(
+        "extern short DAT_00402000[8];\n"
+        "int f(void) { return DAT_00402000[1]; }\n",
+        encoding="utf-8",
+    )
+    first = AuditGlobalDecl(0x402000, "DAT_00402000", "", 1, "short", ["8"], False, None, 16)
+    second = AuditGlobalDecl(0x402010, "DAT_00402010", "", 2, "short", ["4"], False, None, 8)
+
+    issues = build_rebuilt_layout_issues([first, second], str(map_path), 0, (str(source_dir),))
+
+    assert issues == []
+
+
+def test_rebuilt_layout_check_ignores_in_bounds_array_pointer_walk(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(
+        " 0003:00000000       _DAT_00402000      00406000     <common>\n"
+        " 0003:00000010       _DAT_00402034      00406100     <common>\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "activity.cpp").write_text(
+        "extern unsigned int DAT_00402000[13];\n"
+        "void f(void) { unsigned int *p; int i; p = DAT_00402000; i = 13; do { p++; i = i + -1; } while (i != 0); }\n",
+        encoding="utf-8",
+    )
+    first = AuditGlobalDecl(0x402000, "DAT_00402000", "", 1, "unsigned int", ["13"], False, None, 52)
+    second = AuditGlobalDecl(0x402034, "DAT_00402034", "", 2, "short", [], False, None, 2)
 
     issues = build_rebuilt_layout_issues([first, second], str(map_path), 0, (str(source_dir),))
 

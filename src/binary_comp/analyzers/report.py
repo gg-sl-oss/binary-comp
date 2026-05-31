@@ -26,6 +26,7 @@ class SimilarityReportOptions:
     build: bool = True
     canonical_aliases: dict[str, str] | None = None
     file_filter: str | None = None
+    signature_overloads: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -177,7 +178,11 @@ def generate_similarity_report(
 ) -> SimilarityReport:
     maybe_build(target, options.build)
 
-    comparer = FunctionComparer(target, canonical_aliases=options.canonical_aliases)
+    comparer = FunctionComparer(
+        target,
+        canonical_aliases=options.canonical_aliases,
+        signature_overloads=options.signature_overloads,
+    )
     original_image = PEImage(target.original_exe)
     max_bytes, padding_mnemonics = load_disassembly_policy(target)
     groups_by_source = load_source_groups(target.source_dirs, target.map_skip, target.source_excludes)
@@ -206,6 +211,52 @@ def generate_similarity_report(
         for group in matching_groups:
             occurrence_index = occurrences.get(group.name, 0)
             occurrences[group.name] = occurrence_index + 1
+
+            # MSVC SEH functions are exported by Ghidra as several contiguous
+            # chunks (a short FS-frame prologue + the body), each carrying its own
+            # "Function start:" annotation, so a single source function ends up with
+            # multiple original addresses. The rebuilt binary has ONE function, so
+            # compare it once against the concatenated chunks instead of measuring
+            # each chunk separately (which makes the prologue chunk a spurious ~5%
+            # row that also drags the average down).
+            if len(group.addresses) > 1:
+                chunk_paths: list[str] = []
+                missing_chunks = False
+                for address_text in group.addresses:
+                    address = int(address_text, 16)
+                    path = disassembly_path(target, address)
+                    if path is None or not os.path.exists(path):
+                        missing_chunks = True
+                        break
+                    chunk_paths.append(path)
+
+                if not missing_chunks and chunk_paths:
+                    entry_address = min(int(a, 16) for a in group.addresses)
+                    try:
+                        comparison = comparer.compare_combined(group.name, chunk_paths, build=False)
+                    except (FunctionCompareError, FileNotFoundError, RuntimeError, ValueError):
+                        errors += 1
+                        rows.append(SimilarityReportRow(source_file, group.name, entry_address, None, "NOT FOUND"))
+                    else:
+                        similarity = comparison.similarity
+                        compared += 1
+                        similarity_sum += similarity
+                        if similarity >= 99.99:
+                            at_100 += 1
+                        if similarity >= 90.0:
+                            above_90 += 1
+                        else:
+                            below_90 += 1
+                        rows.append(SimilarityReportRow(
+                            source_file,
+                            group.name,
+                            entry_address,
+                            similarity,
+                            f"{similarity:.2f}%",
+                        ))
+                    continue
+                # fall through to per-chunk handling if a chunk's disasm is missing
+
             for address_text in group.addresses:
                 address = int(address_text, 16)
                 path = disassembly_path(target, address)

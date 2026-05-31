@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
+from binary_comp.core.symbols import decode_msvc_pointer_class_tokens, normalize_compiled
 from binary_comp.source.cpp import parse_source_function_groups
 
 
@@ -511,57 +512,9 @@ def extract_calls_from_original(disasm_path: str, policy: CallsPolicy) -> list[s
     return calls
 
 
-def decode_msvc_pointer_class_tokens(encoded: str) -> list[str]:
-    tokens = []
-    for match in re.finditer(r"PAV([^@]+)@@", encoded):
-        token = match.group(1)
-        if token.isdigit():
-            if tokens:
-                tokens.append(tokens[-1])
-            continue
-        tokens.append(token.replace("@", "::"))
-    return tokens
-
-
-def normalize_compiled(name: str, signature_names: frozenset[str] = frozenset()) -> str:
-    name = name.strip()
-    if name.startswith("??0") and "@@" in name:
-        match = re.match(r"\?\?0(\w+)@@", name)
-        if match:
-            return f"{match.group(1)}::{match.group(1)}"
-    if name.startswith("??1") and "@@" in name:
-        match = re.match(r"\?\?1(\w+)@@", name)
-        if match:
-            return f"{match.group(1)}::~{match.group(1)}"
-    if name.startswith("??2@"):
-        return "operator_new"
-    if name.startswith("??3@"):
-        return "operator_delete"
-    if name.startswith("?") and "@@" in name:
-        match = re.match(r"\?(\w+)@(\w+)@@", name)
-        if match:
-            normalized = f"{match.group(2)}::{match.group(1)}"
-            if normalized in signature_names:
-                class_tokens = decode_msvc_pointer_class_tokens(name[match.end():])
-                if len(class_tokens) > 1:
-                    return f"{normalized}({','.join(f'{item}*' for item in class_tokens[1:])})"
-            return normalized
-        match = re.match(r"\?(\w+)@@", name)
-        if match:
-            return match.group(1)
-    if name.startswith("_") and "::" not in name and "@" not in name:
-        return name[1:]
-    match = re.match(r"@([\w]+)@\d+", name)
-    if match:
-        return match.group(1)
-    match = re.match(r"_?(\w+)@\d+$", name)
-    if match:
-        return match.group(1)
-    if "eh vector constructor iterator" in name:
-        return "__eh_vec_ctor__"
-    if "eh vector destructor iterator" in name:
-        return "__eh_vec_dtor__"
-    return name
+# decode_msvc_pointer_class_tokens / normalize_compiled now live in
+# binary_comp.core.symbols (shared with the source-to-map matcher); re-exported
+# above via the module import so existing references keep working.
 
 
 def extract_calls_from_compiled(

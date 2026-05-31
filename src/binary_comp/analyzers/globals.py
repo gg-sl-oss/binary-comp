@@ -1617,6 +1617,20 @@ def is_layout_sensitive_address_tail(tail: str) -> bool:
     return bool(re.match(r"\s*\)*\s*(?:\+|-|\[)", tail))
 
 
+def previous_nonspace_char(text: str, pos: int) -> str:
+    i = pos - 1
+    while i >= 0 and text[i].isspace():
+        i -= 1
+    if i < 0:
+        return ""
+    return text[i]
+
+
+def line_is_preprocessor_directive(text: str, pos: int) -> bool:
+    line_start = text.rfind("\n", 0, pos) + 1
+    return text[line_start:pos].lstrip().startswith("#")
+
+
 def parse_int_literal(text: str) -> Optional[int]:
     if not INT_LITERAL_RE.fullmatch(text.strip()):
         return None
@@ -1665,6 +1679,175 @@ def layout_use_is_provably_in_bounds(text: str, match, decl: GlobalDecl) -> bool
     return False
 
 
+def array_decay_use_is_layout_sensitive(text: str, match, decl: GlobalDecl) -> bool:
+    if not decl.dims or decl.size is None or decl.size <= 0:
+        return False
+    if line_is_preprocessor_directive(text, match.start()):
+        return False
+
+    prev = previous_nonspace_char(text, match.start())
+    if prev == "&" or prev == ".":
+        return False
+    prefix = text[max(0, match.start() - 80):match.start()]
+    if prefix.rstrip().endswith("->"):
+        return False
+    if re.search(r"\b(?:sizeof|_countof)\s*\(\s*$", prefix):
+        return False
+
+    tail = statement_tail(text, match.end())[:160]
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_prefix = text[line_start:match.start()]
+    if re.search(r"\bextern\b", line_prefix) and re.match(r"\s*\[", tail):
+        return False
+
+    subscript_match = re.match(r"\s*\[\s*({})\s*\]".format(INT_LITERAL_RE.pattern), tail)
+    if subscript_match:
+        index = parse_int_literal(subscript_match.group(1))
+        elem_size = base_type_size(decl.type_text) or 1
+        if index is None:
+            return False
+        offset = index * elem_size
+        return not (0 <= offset and offset + elem_size <= decl.size)
+    if re.match(r"\s*\[", tail):
+        return False
+
+    if re.match(r"\s*(?:\+|-)", tail):
+        return constant_offset_crosses_decl(text, match, decl)
+
+    assigned_var = assigned_variable_for_array_decay(text, match.start())
+    if assigned_var is None:
+        return False
+    return assigned_array_decay_crosses_decl(text, match, decl, assigned_var)
+
+
+def assigned_variable_for_array_decay(text: str, pos: int) -> Optional[str]:
+    line_start = text.rfind("\n", 0, pos) + 1
+    prefix = text[line_start:pos]
+    eq = prefix.rfind("=")
+    if eq < 0:
+        return None
+    if eq > 0 and prefix[eq - 1] in "=!<>":
+        return None
+    rhs_prefix = prefix[eq + 1:].strip()
+    while rhs_prefix:
+        cast = POINTER_CAST_RE.match(rhs_prefix)
+        if cast is None:
+            return None
+        rhs_prefix = rhs_prefix[cast.end():].strip()
+    lhs = prefix[:eq]
+    identifiers = list(re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", lhs))
+    if not identifiers:
+        return None
+    name = identifiers[-1].group(1)
+    if name in {"if", "while", "for", "switch", "return", "sizeof"}:
+        return None
+    return name
+
+
+def first_array_dim(decl: GlobalDecl) -> Optional[int]:
+    if not decl.dims:
+        return None
+    return parse_int_literal(decl.dims[0])
+
+
+def array_decay_stride_unit_size(text: str, match, decl: GlobalDecl) -> Optional[int]:
+    prefix = text[max(0, match.start() - 160):match.start()]
+    cast_size = access_size_from_pointer_casts(prefix)
+    if cast_size is not None:
+        return cast_size
+    first_dim = first_array_dim(decl)
+    if first_dim is not None and first_dim > 0 and decl.size is not None:
+        return decl.size // first_dim
+    return base_type_size(decl.type_text)
+
+
+def pointer_stride_elements_after(text: str, pos: int, name: str) -> Optional[tuple[int, int]]:
+    search = text[pos:pos + 1600]
+    escaped = re.escape(name)
+    patterns = [
+        re.compile(r"\b{}\s*=\s*\b{}\b\s*\+\s*({})\b".format(escaped, escaped, INT_LITERAL_RE.pattern)),
+        re.compile(r"\b{}\s*\+=\s*({})\b".format(escaped, INT_LITERAL_RE.pattern)),
+        re.compile(r"\b{}\s*\+\+".format(escaped)),
+        re.compile(r"\+\+\s*\b{}\b".format(escaped)),
+    ]
+    best: Optional[tuple[int, int]] = None
+    for pattern in patterns:
+        match = pattern.search(search)
+        if match is None:
+            continue
+        stride = 1 if len(match.groups()) == 0 else parse_int_literal(match.group(1))
+        if stride is None:
+            continue
+        absolute_pos = pos + match.start()
+        if best is None or absolute_pos < best[0]:
+            best = (absolute_pos, stride)
+    return best
+
+
+def constant_loop_count_for_pointer_stride(text: str, start: int, stride_pos: int) -> Optional[int]:
+    before_stride = text[start:stride_pos]
+    assignments = list(re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*({})\s*;".format(INT_LITERAL_RE.pattern),
+        before_stride,
+    ))
+    for assignment in reversed(assignments):
+        counter = assignment.group(1)
+        count = parse_int_literal(assignment.group(2))
+        if count is None:
+            continue
+        after_stride = text[stride_pos:stride_pos + 800]
+        escaped = re.escape(counter)
+        decrements = (
+            re.search(r"\b{}\s*=\s*\b{}\b\s*\+\s*-1\b".format(escaped, escaped), after_stride) or
+            re.search(r"\b{}\s*-=\s*1\b".format(escaped), after_stride) or
+            re.search(r"\b{}\s*--".format(escaped), after_stride) or
+            re.search(r"--\s*\b{}\b".format(escaped), after_stride)
+        )
+        if decrements is None:
+            continue
+        if re.search(r"while\s*\(\s*{}\s*!=\s*0\s*\)".format(escaped), after_stride):
+            return count
+    return None
+
+
+def assigned_array_decay_crosses_decl(text: str, match, decl: GlobalDecl, name: str) -> bool:
+    if decl.size is None or decl.size <= 0:
+        return False
+    stride = pointer_stride_elements_after(text, match.end(), name)
+    if stride is None:
+        return False
+    stride_pos, stride_elems = stride
+    unit_size = array_decay_stride_unit_size(text, match, decl)
+    if unit_size is None or unit_size <= 0:
+        return False
+    count = constant_loop_count_for_pointer_stride(text, match.end(), stride_pos)
+    if count is None or count <= 0:
+        return False
+    return count * stride_elems * unit_size > decl.size
+
+
+def array_address_use_is_layout_sensitive(text: str, match, decl: GlobalDecl) -> bool:
+    tail = statement_tail(text, match.end())[:160]
+    subscript_match = re.match(r"\s*\)*\s*\[\s*({})\s*\]".format(INT_LITERAL_RE.pattern), tail)
+    if subscript_match:
+        index = parse_int_literal(subscript_match.group(1))
+        elem_size = base_type_size(decl.type_text) or 1
+        if index is None or decl.size is None or decl.size <= 0:
+            return False
+        offset = index * elem_size
+        return not (0 <= offset and offset + elem_size <= decl.size)
+    if re.match(r"\s*\)*\s*\[", tail):
+        return False
+    return constant_offset_crosses_decl(text, match, decl)
+
+
+def constant_offset_crosses_decl(text: str, match, decl: GlobalDecl) -> bool:
+    tail = statement_tail(text, match.end())[:160]
+    if not re.match(r"\s*\)*\s*(?:\+|-)\s*{}\b".format(INT_LITERAL_RE.pattern), tail):
+        return False
+    return not layout_use_is_provably_in_bounds(text, match, decl)
+
+
 def layout_use_context(text: str, start: int, end: int) -> str:
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", end)
@@ -1696,6 +1879,16 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
             decl = decls_by_name.get(name)
             if decl is None or name in uses:
                 continue
+            if decl.dims:
+                if not array_address_use_is_layout_sensitive(masked, match, decl):
+                    continue
+                uses[name] = LayoutSensitiveUse(
+                    name=name,
+                    path=path,
+                    line=masked.count("\n", 0, match.start()) + 1,
+                    context=layout_use_context(text, match.start(), match.end()),
+                )
+                continue
             tail = statement_tail(masked, match.end())
             if not is_layout_sensitive_address_tail(tail):
                 continue
@@ -1707,6 +1900,20 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
                 line=masked.count("\n", 0, match.start()) + 1,
                 context=layout_use_context(text, match.start(), match.end()),
             )
+        for name, decl in decls_by_name.items():
+            if not decl.dims or name in uses:
+                continue
+            pattern = re.compile(r"(?<![A-Za-z0-9_]){}(?![A-Za-z0-9_])".format(re.escape(name)))
+            for match in pattern.finditer(masked):
+                if not array_decay_use_is_layout_sensitive(masked, match, decl):
+                    continue
+                uses[name] = LayoutSensitiveUse(
+                    name=name,
+                    path=path,
+                    line=masked.count("\n", 0, match.start()) + 1,
+                    context=layout_use_context(text, match.start(), match.end()),
+                )
+                break
     return uses
 
 
@@ -1758,18 +1965,12 @@ def build_rebuilt_layout_issues(decls: List[GlobalDecl],
             ))
 
     if source_dirs:
-        scalar_decls = {
-            decl.name: decl for decl in by_addr
-            if not decl.dims and "*" not in normalize_type(decl.type_text) and decl.size is not None and decl.size > 0
-        }
-        layout_uses = find_layout_sensitive_global_uses(
-            source_dirs,
-            source_excludes,
-            scalar_decls,
-            ignored_source_paths,
-        )
+        layout_candidate_decls: dict[str, GlobalDecl] = {}
+        layout_candidate_next: dict[str, tuple[GlobalDecl, int, int, int]] = {}
         for i, decl in enumerate(by_addr[:-1]):
-            if decl.address < min_address or decl.size is None or decl.size <= 0 or decl.name not in layout_uses:
+            if decl.address < min_address or decl.size is None or decl.size <= 0:
+                continue
+            if "*" in normalize_type(decl.type_text):
                 continue
             other = by_addr[i + 1]
             if other.address < min_address or other.address != decl.address + decl.size:
@@ -1781,7 +1982,20 @@ def build_rebuilt_layout_issues(decls: List[GlobalDecl],
             expected = decl_rebuilt + decl.size
             if other_rebuilt == expected:
                 continue
-            use = layout_uses[decl.name]
+            layout_candidate_decls[decl.name] = decl
+            layout_candidate_next[decl.name] = (other, decl_rebuilt, other_rebuilt, expected)
+        layout_uses = find_layout_sensitive_global_uses(
+            source_dirs,
+            source_excludes,
+            layout_candidate_decls,
+            ignored_source_paths,
+        )
+        for name, use in layout_uses.items():
+            decl = layout_candidate_decls.get(name)
+            candidate = layout_candidate_next.get(name)
+            if decl is None or candidate is None:
+                continue
+            other, decl_rebuilt, other_rebuilt, expected = candidate
             issues.append(Issue(
                 "REBUILT_LAYOUT_ADJACENT_SPLIT",
                 decl.address,

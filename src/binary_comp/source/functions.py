@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 
 from binary_comp.core.mapfile import MapEntry, parse_msvc_map_by_obj
-from binary_comp.core.symbols import symbol_matches, symbol_patterns_for_function
+from binary_comp.core.symbols import normalize_compiled, symbol_matches, symbol_patterns_for_function
 
 from .cpp import SourceFunctionGroup, parse_source_function_groups
 
@@ -52,10 +52,13 @@ def load_source_groups(
     source_dirs: tuple[str, ...],
     map_skip: str | None = None,
     source_excludes: tuple[str, ...] = (),
+    signature_names: frozenset[str] = frozenset(),
 ) -> dict[str, list[SourceFunctionGroup]]:
     groups_by_source: dict[str, list[SourceFunctionGroup]] = {}
     for path in iter_cpp_files_excluding(source_dirs, map_skip, source_excludes):
-        groups = parse_source_function_groups(path, include_no_assembly=False)
+        groups = parse_source_function_groups(
+            path, include_no_assembly=False, signature_names=signature_names
+        )
         if groups:
             groups_by_source[path] = groups
     return groups_by_source
@@ -64,6 +67,7 @@ def load_source_groups(
 def map_source_groups(
     groups_by_source: dict[str, list[SourceFunctionGroup]],
     map_path: str,
+    signature_names: frozenset[str] = frozenset(),
 ) -> tuple[list[FunctionGroup], list[tuple[str, SourceFunctionGroup]], dict[str, list[MapEntry]]]:
     entries_by_obj = parse_msvc_map_by_obj(map_path)
     mapped: list[FunctionGroup] = []
@@ -75,14 +79,27 @@ def map_source_groups(
         used: set[int] = set()
 
         for group in groups_by_source[source_path]:
-            patterns = symbol_patterns_for_function(group.name)
             hit = None
-            for idx, entry in enumerate(obj_entries):
-                if idx in used:
-                    continue
-                if symbol_matches(entry.symbol, patterns):
-                    hit = (idx, entry)
-                    break
+            # Overloads are parsed with a parameter signature in the name
+            # (e.g. "Foo::Bar(SpriteAction*)"). Match the map entry whose
+            # demangled signature is identical, so the greedy name-only fallback
+            # below never pairs an overload's source with the wrong rebuilt entry.
+            if "(" in group.name:
+                for idx, entry in enumerate(obj_entries):
+                    if idx in used:
+                        continue
+                    if normalize_compiled(entry.symbol, signature_names) == group.name:
+                        hit = (idx, entry)
+                        break
+
+            if hit is None:
+                patterns = symbol_patterns_for_function(group.name)
+                for idx, entry in enumerate(obj_entries):
+                    if idx in used:
+                        continue
+                    if symbol_matches(entry.symbol, patterns):
+                        hit = (idx, entry)
+                        break
             if hit is None:
                 missing.append((source_path, group))
                 continue

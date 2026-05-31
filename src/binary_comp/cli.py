@@ -342,6 +342,16 @@ def extract_canonical_aliases(config: dict) -> dict[str, str]:
     }
 
 
+def extract_signature_overloads(config: dict) -> frozenset[str]:
+    calls = config.get("calls", {})
+    if not isinstance(calls, dict):
+        return frozenset()
+    overloads = calls.get("signature_overloads", [])
+    if not isinstance(overloads, list):
+        return frozenset()
+    return frozenset(str(item) for item in overloads if isinstance(item, str) and item)
+
+
 def parse_skip_ranges(values: list[str]) -> tuple[tuple[int, int], ...]:
     ranges: list[tuple[int, int]] = []
     for value in values or ():
@@ -422,11 +432,28 @@ def run_data(args) -> int:
 def run_compare(args) -> int:
     try:
         config, target = load_project_target(args.config, args.target)
-        comparison = FunctionComparer(target, canonical_aliases=extract_canonical_aliases(config)).compare(
-            args.function_name,
-            args.disassembled_code,
-            build=not args.no_build,
+        comparer = FunctionComparer(
+            target,
+            canonical_aliases=extract_canonical_aliases(config),
+            signature_overloads=extract_signature_overloads(config),
         )
+        # SEH-split functions span several original chunks (FS-frame prologue +
+        # body); when the requested function is one of them, compare against all
+        # chunks combined so a prologue-only chunk isn't scored in isolation as a
+        # spurious ~5% match.
+        siblings = comparer.sibling_chunk_paths(args.function_name, args.disassembled_code)
+        if siblings and len(siblings) > 1:
+            comparison = comparer.compare_combined(
+                args.function_name,
+                siblings,
+                build=not args.no_build,
+            )
+        else:
+            comparison = comparer.compare(
+                args.function_name,
+                args.disassembled_code,
+                build=not args.no_build,
+            )
     except (ConfigError, FileNotFoundError, RuntimeError, ValueError, FunctionCompareError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -462,6 +489,7 @@ def run_report(args) -> int:
                 build=not args.no_build,
                 canonical_aliases=extract_canonical_aliases(config),
                 file_filter=args.file_filter,
+                signature_overloads=extract_signature_overloads(config),
             ),
         )
     except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as exc:

@@ -90,6 +90,13 @@ def walk(node):
 def parse_function_start_comment(text: str, line_text: str, include_no_assembly: bool = False) -> str | None:
     if not include_no_assembly and "No assembly extracted" in line_text:
         return None
+    # A scalar/vector deleting destructor (sdtor) is a compiler-generated COMDAT,
+    # not part of the source function. When the source documents its address
+    # alongside the real destructor (e.g. "/* Foo sdtor (COMDAT,
+    # compiler-generated) */"), exclude it so it is not combined with — or
+    # mistaken for — the real destructor body.
+    if "compiler-generated" in line_text.lower():
+        return None
     if "Function start:" not in text:
         return None
 

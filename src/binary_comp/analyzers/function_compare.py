@@ -28,6 +28,11 @@ from binary_comp.source.functions import load_source_groups, map_source_groups
 DEFAULT_MAX_DISASSEMBLY_BYTES = 0x20000
 DEFAULT_PADDING_MNEMONICS = frozenset({"nop", "int3"})
 
+# How much better (in percentage points) a sibling overload / deleting-destructor
+# must score than the name-based default before it overrides it. Keeps genuine
+# near-identical overloads stable while still correcting gross mispairings.
+CANDIDATE_OVERRIDE_EPSILON = 1.0
+
 
 class FunctionCompareError(RuntimeError):
     pass
@@ -460,9 +465,15 @@ def side_by_side(str1: str, str2: str, tab_size: int = 4) -> str:
 
 
 class FunctionComparer:
-    def __init__(self, target: ProjectTarget, canonical_aliases: dict[str, str] | None = None):
+    def __init__(
+        self,
+        target: ProjectTarget,
+        canonical_aliases: dict[str, str] | None = None,
+        signature_overloads: frozenset[str] = frozenset(),
+    ):
         self.target = target
         self.canonical_aliases = canonical_aliases or {}
+        self.signature_overloads = signature_overloads
         self.max_bytes, self.padding_mnemonics = load_disassembly_policy(target)
         self._source_groups = None
         self._map_entries = None
@@ -480,8 +491,13 @@ class FunctionComparer:
                 self.target.source_dirs,
                 self.target.map_skip,
                 self.target.source_excludes,
+                signature_names=self.signature_overloads,
             )
-            self._source_groups = map_source_groups(groups_by_source, self.target.map_path)[0]
+            self._source_groups = map_source_groups(
+                groups_by_source,
+                self.target.map_path,
+                signature_names=self.signature_overloads,
+            )[0]
         return self._source_groups
 
     def map_entries(self):
@@ -548,6 +564,86 @@ class FunctionComparer:
             return mapped
         return self.map_symbol_rebuilt_address(function_name)
 
+    def candidate_rebuilt_addresses(self, function_name: str, original_addr: int) -> list[int]:
+        """Rebuilt addresses to score for this source function.
+
+        The name-based resolution (the primary) never considers the
+        compiler-generated *scalar/vector deleting destructor* COMDATs
+        (``??_G``/``??_E``) that ``delete`` actually calls. When the original a
+        destructor is annotated with is one of those (e.g. ``DrawEntry``'s only
+        ``/* Function start */`` points at its sdtor), the primary ``??1``
+        real-destructor is the wrong rebuilt pairing.
+
+        Returns the primary first, then only those deleting-destructor COMDAT
+        siblings. Overloads are deliberately NOT included here: picking the
+        best-scoring overload would mask a genuinely poor match against a
+        like-named sibling. Overload disambiguation is handled up front by the
+        signature-aware source-to-map matching instead.
+        """
+        seen: set[int] = set()
+        ordered: list[int] = []
+        primary = self.rebuilt_address(function_name, original_addr)
+        if primary is not None:
+            seen.add(primary)
+            ordered.append(primary)
+
+        base = canonical_function_name(function_name)
+        if "::" not in base:
+            return ordered
+        class_name, method_name = base.rsplit("::", 1)
+        if not method_name.startswith("~"):
+            return ordered
+
+        class_leaf = class_name.rsplit("::", 1)[-1]
+        variant_prefixes = (f"??_G{class_leaf}@@", f"??_E{class_leaf}@@")
+        for entries in self.map_entries().values():
+            for entry in entries:
+                if entry.va in seen:
+                    continue
+                if any(entry.symbol.startswith(prefix) for prefix in variant_prefixes):
+                    seen.add(entry.va)
+                    ordered.append(entry.va)
+        return ordered
+
+    def _best_candidate(
+        self,
+        function_name: str,
+        original_addr: int,
+        original_mnemonics: list[str],
+        rebuilt_image: PEImage,
+    ) -> tuple[int, DisassemblyResult, float] | None:
+        """Pick the rebuilt variant most similar to the supplied original.
+
+        The first candidate (the name-based resolution) is the default; a
+        sibling overload/deleting-destructor only wins if it beats the default
+        by more than ``CANDIDATE_OVERRIDE_EPSILON``, so near-identical overloads
+        are never flipped by mnemonic noise.
+        """
+        results: list[tuple[int, DisassemblyResult, float]] = []
+        for candidate in self.candidate_rebuilt_addresses(function_name, original_addr):
+            rebuilt = disassemble_function(
+                rebuilt_image,
+                candidate,
+                self.rebuilt_function_starts(candidate),
+                self.max_bytes,
+                self.padding_mnemonics,
+            )
+            if not rebuilt.instructions:
+                continue
+            similarity = mnemonic_similarity(
+                instruction_mnemonics(rebuilt.instructions),
+                original_mnemonics,
+            )
+            results.append((candidate, rebuilt, similarity))
+
+        if not results:
+            return None
+        primary = results[0]
+        best = max(results, key=lambda result: result[2])
+        if best is primary or best[2] > primary[2] + CANDIDATE_OVERRIDE_EPSILON:
+            return best
+        return primary
+
     def rebuilt_function_starts(self, rebuilt_addr: int) -> list[int]:
         starts = set(function_starts_from_map(self.map_entries()))
         starts.add(rebuilt_addr)
@@ -565,8 +661,7 @@ class FunctionComparer:
         if original_addr is None:
             raise FunctionCompareError("could not determine original function address")
 
-        rebuilt_addr = self.rebuilt_address(function_name, original_addr)
-        if rebuilt_addr is None:
+        if self.rebuilt_address(function_name, original_addr) is None:
             raise FunctionCompareError("function not found in linker map")
 
         for path, label in (
@@ -579,15 +674,7 @@ class FunctionComparer:
 
         original_image = self.pe_image(self.target.original_exe)
         rebuilt_image = self.pe_image(self.target.rebuilt_exe)
-        rebuilt_starts = self.rebuilt_function_starts(rebuilt_addr)
 
-        rebuilt = disassemble_function(
-            rebuilt_image,
-            rebuilt_addr,
-            rebuilt_starts,
-            self.max_bytes,
-            self.padding_mnemonics,
-        )
         original = disassemble_exported_function(
             original_image,
             disassembled_code_path,
@@ -595,16 +682,18 @@ class FunctionComparer:
             self.max_bytes,
             self.padding_mnemonics,
         )
-
-        if not rebuilt.instructions:
-            raise FunctionCompareError("function found but could not disassemble rebuilt bytes")
         if not original.instructions:
             raise FunctionCompareError("could not disassemble original bytes")
 
-        similarity = mnemonic_similarity(
-            instruction_mnemonics(rebuilt.instructions),
+        best = self._best_candidate(
+            function_name,
+            original_addr,
             instruction_mnemonics(original.instructions),
+            rebuilt_image,
         )
+        if best is None:
+            raise FunctionCompareError("function found but could not disassemble rebuilt bytes")
+        rebuilt_addr, rebuilt, similarity = best
 
         return FunctionComparison(
             function_name=function_name,
@@ -614,6 +703,132 @@ class FunctionComparer:
             rebuilt=rebuilt,
             original=original,
         )
+
+    def compare_combined(
+        self,
+        function_name: str,
+        disassembled_code_paths: list[str],
+        build: bool = True,
+    ) -> FunctionComparison:
+        """Compare one rebuilt function against several original pieces at once.
+
+        MSVC SEH functions are exported by Ghidra as multiple contiguous chunks
+        (a short FS-frame prologue followed by the body), and the source carries
+        one ``/* Function start: */`` annotation per chunk. The rebuilt binary,
+        however, contains a single function. Comparing the whole rebuilt function
+        against each chunk in isolation makes the prologue-only chunk look like a
+        spurious ~5% match and understates the body chunk. Concatenating the
+        original chunks (in address order) and comparing once yields the true
+        similarity for the function as a whole.
+        """
+        maybe_build(self.target, build)
+
+        addr_paths: list[tuple[int, str]] = []
+        for path in disassembled_code_paths:
+            addr = parse_original_address(path)
+            if addr is not None:
+                addr_paths.append((addr, path))
+        if not addr_paths:
+            raise FunctionCompareError("could not determine original function address")
+        addr_paths.sort(key=lambda item: item[0])
+        original_addr = addr_paths[0][0]
+
+        if self.rebuilt_address(function_name, original_addr) is None:
+            raise FunctionCompareError("function not found in linker map")
+
+        for path, label in (
+            (self.target.original_exe, "original executable"),
+            (self.target.rebuilt_exe, "rebuilt executable"),
+            (self.target.map_path, "linker map"),
+        ):
+            if not os.path.exists(path):
+                raise FunctionCompareError(f"missing {label}: {path}")
+
+        original_image = self.pe_image(self.target.original_exe)
+        rebuilt_image = self.pe_image(self.target.rebuilt_exe)
+
+        original_instructions: list[Instruction] = []
+        seen: set[int] = set()
+        for addr, path in addr_paths:
+            piece = disassemble_exported_function(
+                original_image,
+                path,
+                addr,
+                self.max_bytes,
+                self.padding_mnemonics,
+            )
+            for instr in piece.instructions:
+                if instr.address in seen:
+                    continue
+                seen.add(instr.address)
+                original_instructions.append(instr)
+        if not original_instructions:
+            raise FunctionCompareError("could not disassemble original bytes")
+
+        best = self._best_candidate(
+            function_name,
+            original_addr,
+            instruction_mnemonics(original_instructions),
+            rebuilt_image,
+        )
+        if best is None:
+            raise FunctionCompareError("function found but could not disassemble rebuilt bytes")
+        rebuilt_addr, rebuilt, similarity = best
+
+        return FunctionComparison(
+            function_name=function_name,
+            original_addr=original_addr,
+            rebuilt_addr=rebuilt_addr,
+            similarity=similarity,
+            rebuilt=rebuilt,
+            original=DisassemblyResult(original_instructions, []),
+        )
+
+    def _disasm_path(self, address: int) -> str | None:
+        if not self.target.code_dir:
+            return None
+        candidates = (
+            os.path.join(self.target.code_dir, f"FUN_{address:08X}.disassembled.txt"),
+            os.path.join(self.target.code_dir, f"FUN_{address:06X}.disassembled.txt"),
+            os.path.join(self.target.code_dir, f"FUN_{address:X}.disassembled.txt"),
+        )
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
+    def sibling_chunk_paths(self, function_name: str, disassembled_code_path: str) -> list[str] | None:
+        """Disasm paths for all chunks of an SEH-split function, or None.
+
+        If ``function_name`` is annotated in the source with several
+        ``/* Function start: */`` addresses (the FS-frame prologue chunk plus the
+        body chunk(s) that Ghidra exports separately) and the supplied path is one
+        of them, return every chunk's disasm path in address order so the caller
+        can compare the whole rebuilt function against the combined original.
+        Returns None for ordinary single-chunk functions.
+        """
+        addr = parse_original_address(disassembled_code_path)
+        if addr is None:
+            return None
+        try:
+            groups = self.source_groups()
+        except (ConfigError, FileNotFoundError, RuntimeError):
+            return None
+        wanted = canonical_function_name(function_name)
+        for group in groups:
+            if (
+                canonical_function_name(group.name) == wanted
+                and addr in group.original_addrs
+                and len(group.original_addrs) > 1
+            ):
+                paths: list[str] = []
+                for chunk_addr in sorted(group.original_addrs):
+                    path = self._disasm_path(chunk_addr)
+                    if path is None:
+                        return None
+                    paths.append(path)
+                return paths
+        return None
 
 
 def format_side_by_side(comparison: FunctionComparison) -> str:
