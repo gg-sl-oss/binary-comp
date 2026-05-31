@@ -12,7 +12,7 @@ from binary_comp.analyzers.calls import (
     extract_calls_from_original,
     load_calls_policy,
     normalize_compiled,
-    parse_vtable_call,
+    parse_indirect_call,
     policy_with_same_address_aliases,
     resolve_original_call,
 )
@@ -150,8 +150,8 @@ def test_named_disassembly_header_resolves_only_when_compiled_target_matches():
 def test_stack_indirect_calls_are_not_vtable_calls(tmp_path):
     policy = load_calls_policy({})
 
-    assert parse_vtable_call("CALL dword ptr [ESP + 0x28]", policy) == "__indirect__"
-    assert parse_vtable_call("CALL dword ptr [EAX + 0x28]", policy) == "vtable[0x28]"
+    assert parse_indirect_call("CALL dword ptr [ESP + 0x28]", policy) == "__indirect__"
+    assert parse_indirect_call("CALL dword ptr [EAX + 0x28]", policy) == "indirect[0x28]"
 
     asm_path = tmp_path / "stack-callback.asm"
     asm_path.write_text(
@@ -206,7 +206,7 @@ _TEXT ENDS
         encoding="utf-8",
     )
 
-    assert extract_calls_from_compiled(str(asm_path), "Run") == ["vtable[0x94]"]
+    assert extract_calls_from_compiled(str(asm_path), "Run") == ["indirect[0x94]"]
 
 
 def test_source_groups_map_to_rebuilt_symbols(fixture_root):
