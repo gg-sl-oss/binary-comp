@@ -1,0 +1,14 @@
+{
+  "targets": {
+    "demo": {
+      "original_exe": "artifacts/original/original.exe",
+      "rebuilt_exe": "artifacts/rebuilt/rebuilt.exe",
+      "map": "artifacts/rebuilt/rebuilt.map",
+      "source_dirs": ["src/rebuilt"],
+      "globals_source": "src/rebuilt/rebuilt.cpp",
+      "code_export_dir": "code",
+      "asm_dir": "artifacts/rebuilt",
+      "library_ranges": [["0x00401105", "0xffffffff"]]
+    }
+  }
+}

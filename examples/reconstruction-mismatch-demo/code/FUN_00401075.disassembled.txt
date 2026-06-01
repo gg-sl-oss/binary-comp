@@ -1,0 +1,28 @@
+Function: FUN_00401075
+Address: 0x00401075
+
+push ebp
+mov ebp, esp
+sub esp, 4
+push ebx
+push esi
+push edi
+mov dword ptr [ebp - 4], ecx
+mov eax, dword ptr [ebp - 4]
+mov ecx, dword ptr [ebp + 8]
+cmp dword ptr [eax], ecx
+jne 0x401099
+mov eax, 1
+jmp 0x4010b8
+mov eax, dword ptr [0x405038]
+cmp dword ptr [ebp + 8], eax
+jne 0x4010b1
+mov eax, 1
+jmp 0x4010b8
+xor eax, eax
+jmp 0x4010b8
+pop edi
+pop esi
+pop ebx
+leave
+ret 4

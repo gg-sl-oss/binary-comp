@@ -1,0 +1,29 @@
+Function: FUN_00401038
+Address: 0x00401038
+
+push ebp
+mov ebp, esp
+sub esp, 4
+push ebx
+push esi
+push edi
+mov dword ptr [ebp - 4], ecx
+mov eax, dword ptr [ebp - 4]
+add dword ptr [eax], 3
+cmp dword ptr [ebp + 8], 0
+jle 0x401064
+xor eax, eax
+mov ecx, dword ptr [ebp + 8]
+add ecx, ecx
+sub eax, ecx
+neg eax
+mov ecx, dword ptr [ebp - 4]
+sub dword ptr [ecx], eax
+mov eax, dword ptr [ebp - 4]
+mov eax, dword ptr [eax]
+jmp 0x40106e
+pop edi
+pop esi
+pop ebx
+leave
+ret 4

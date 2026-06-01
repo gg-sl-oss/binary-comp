@@ -1,0 +1,16 @@
+Function: FUN_00401105
+Address: 0x00401105
+
+push ebp
+mov ebp, esp
+push ebx
+push esi
+push edi
+mov eax, dword ptr [ebp + 8]
+inc eax
+jmp 0x401114
+pop edi
+pop esi
+pop ebx
+leave
+ret
