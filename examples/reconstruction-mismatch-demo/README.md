@@ -80,7 +80,8 @@ From this directory, with `binary-comp` installed:
    make build
    ```
 
-`make build` runs the export step automatically. To run that step by hand:
+`make build` runs the export step automatically and creates the ignored
+`code/FUN_*.disassembled.txt` files on first use. To run that step by hand:
 
 ```bash
 binary-comp export-asm --config binary-comp.json --target demo --clean --no-source

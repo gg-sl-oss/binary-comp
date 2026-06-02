@@ -1,2 +1,3 @@
 artifacts/**/*.obj
+code/FUN_*.disassembled.txt
 .tools/

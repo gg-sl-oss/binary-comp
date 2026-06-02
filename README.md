@@ -147,7 +147,8 @@ contains a small, partially reconstructed C++ console program built with MSVC
 - Original and rebuilt C++ source files.
 - Real 32-bit PE executables compiled by MSVC 4.2.
 - MSVC linker maps and assembly listings.
-- Capstone-generated Ghidra-style `FUN_*.disassembled.txt` exports.
+- A Makefile step that generates Capstone-based Ghidra-style
+  `FUN_*.disassembled.txt` exports.
 - A `binary-comp.json` target that runs the package against those artifacts.
 - A Makefile that downloads `wibo` and MSVC420 into a local `.tools/`
   directory; no submodules are required.
@@ -168,8 +169,8 @@ binary-comp seh --config binary-comp.json --target demo --report --no-build
 ```
 
 `make build` invokes `binary-comp export-asm --config binary-comp.json --target demo --clean --no-source`,
-so the committed `code/FUN_*.disassembled.txt` files come from auto-discovery
-rather than Ghidra or an original linker map.
+so the local `code/FUN_*.disassembled.txt` files are regenerated from
+auto-discovery rather than committed Ghidra exports or an original linker map.
 
 The example intentionally includes discrepancies across four small reconstructed
 classes plus an original-only cleanup helper: function similarity differences,
