@@ -231,6 +231,63 @@ def generate_similarity_report(
                     chunk_paths.append(path)
 
                 if not missing_chunks and chunk_paths:
+                    # A multi-address group is either one SEH function split into
+                    # contiguous chunks (short FS prologue + body) or N duplicate
+                    # instances of the same function (e.g. identical non-COMDAT
+                    # methods emitted once per class/TU). Chunks of an SEH split
+                    # look nothing alike, while duplicate instances share the
+                    # same mnemonic stream — so pairwise-compare the original
+                    # pieces to tell them apart.
+                    chunk_mnemonics: list[list[str]] = []
+                    for address_text, path in zip(group.addresses, chunk_paths):
+                        try:
+                            piece = disassemble_exported_function(
+                                original_image,
+                                path,
+                                int(address_text, 16),
+                                max_bytes,
+                                padding_mnemonics,
+                            )
+                        except (FileNotFoundError, RuntimeError, ValueError):
+                            chunk_mnemonics = []
+                            break
+                        chunk_mnemonics.append(instruction_mnemonics(piece.instructions))
+                    duplicate_instances = (
+                        len(chunk_mnemonics) == len(chunk_paths)
+                        and all(len(mnems) >= 8 for mnems in chunk_mnemonics)
+                        and all(
+                            mnemonic_similarity(chunk_mnemonics[0], mnems) >= 80.0
+                            for mnems in chunk_mnemonics[1:]
+                        )
+                    )
+
+                    if duplicate_instances:
+                        for address_text, path in zip(group.addresses, chunk_paths):
+                            address = int(address_text, 16)
+                            try:
+                                comparison = comparer.compare(group.name, path, build=False)
+                            except (FunctionCompareError, FileNotFoundError, RuntimeError, ValueError):
+                                errors += 1
+                                rows.append(SimilarityReportRow(source_file, group.name, address, None, "NOT FOUND"))
+                                continue
+                            similarity = comparison.similarity
+                            compared += 1
+                            similarity_sum += similarity
+                            if similarity >= 99.99:
+                                at_100 += 1
+                            if similarity >= 90.0:
+                                above_90 += 1
+                            else:
+                                below_90 += 1
+                            rows.append(SimilarityReportRow(
+                                source_file,
+                                group.name,
+                                address,
+                                similarity,
+                                f"{similarity:.2f}%",
+                            ))
+                        continue
+
                     entry_address = min(int(a, 16) for a in group.addresses)
                     try:
                         comparison = comparer.compare_combined(group.name, chunk_paths, build=False)

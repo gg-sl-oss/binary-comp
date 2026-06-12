@@ -1541,6 +1541,17 @@ def rebuilt_va_for_decl(decl: GlobalDecl,
 ADDRESS_OF_NAME_RE = re.compile(r"&\s*([A-Za-z_][A-Za-z0-9_]*)")
 POINTER_CAST_RE = re.compile(r"\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*\*\s*\)")
 INT_LITERAL_RE = re.compile(r"0[xX][0-9A-Fa-f]+|\d+")
+DISASM_BRACKET_RE = re.compile(r"\[([^\]]+)\]")
+DISASM_ADDRESS_RE = re.compile(r"(?<![\w])(?:0x)?([0-9A-Fa-f]{6,8})(?![\w])")
+DISASM_REGISTER_RE = re.compile(r"\b(?:e?[abcd]x|e?[sd]i|e?[sb]p|[abcd][hl])\b", re.IGNORECASE)
+DISASM_SCALE_RE = re.compile(r"\*\s*(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+H|\d+)")
+DISASM_PTR_SIZE_RE = re.compile(r"\b(byte|word|dword|qword)\s+ptr\b", re.IGNORECASE)
+DISASM_PTR_SIZES = {
+    "byte": 1,
+    "word": 2,
+    "dword": 4,
+    "qword": 8,
+}
 
 
 def iter_source_scan_files(source_dirs: Sequence[str],
@@ -1917,9 +1928,125 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
     return uses
 
 
+def parse_disasm_int_literal(text: str) -> Optional[int]:
+    text = text.strip()
+    try:
+        if text.lower().startswith("0x"):
+            return int(text, 16)
+        if text.upper().endswith("H"):
+            return int(text[:-1], 16)
+        return int(text, 10)
+    except ValueError:
+        return None
+
+
+def disasm_memory_access_size(line: str) -> int:
+    match = DISASM_PTR_SIZE_RE.search(line)
+    if match is None:
+        return 1
+    return DISASM_PTR_SIZES.get(match.group(1).lower(), 1)
+
+
+def disasm_index_stride(content: str) -> int:
+    strides: List[int] = []
+    for match in DISASM_SCALE_RE.finditer(content):
+        stride = parse_disasm_int_literal(match.group(1))
+        if stride is not None and stride > 0:
+            strides.append(stride)
+    return min(strides) if strides else 1
+
+
+def source_decl_containing_address(address: int,
+                                   decls: Sequence[GlobalDecl],
+                                   starts: Sequence[int]) -> Optional[GlobalDecl]:
+    index = bisect_right(starts, address) - 1
+    if index < 0:
+        return None
+    decl = decls[index]
+    if decl.size is None or decl.size <= 0:
+        return None
+    if decl.address <= address < decl.address + decl.size:
+        return decl
+    return None
+
+
+def find_original_indexed_global_issues(decls: Sequence[GlobalDecl],
+                                        code_dir: str,
+                                        min_address: int) -> List[Issue]:
+    if not code_dir or not os.path.isdir(code_dir):
+        return []
+
+    source_ranges = sorted(
+        (
+            decl for decl in decls
+            if not is_cpp_vtable_placeholder(decl.name)
+            and decl.size is not None
+            and decl.size > 0
+        ),
+        key=lambda item: item.address,
+    )
+    starts = [decl.address for decl in source_ranges]
+    issues: List[Issue] = []
+    seen: Set[Tuple[str, int]] = set()
+
+    for filename in sorted(os.listdir(code_dir)):
+        if not filename.endswith(".disassembled.txt"):
+            continue
+        path = os.path.join(code_dir, filename)
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for line_no, raw_line in enumerate(lines, 1):
+            line = raw_line.strip()
+            if not line or line.startswith(("Function:", "Address:")) or line.endswith(":"):
+                continue
+            access_size = disasm_memory_access_size(line)
+            for content in DISASM_BRACKET_RE.findall(line):
+                addresses = [int(match.group(1), 16) for match in DISASM_ADDRESS_RE.finditer(content)]
+                if not addresses:
+                    continue
+                without_addresses = DISASM_ADDRESS_RE.sub("", content)
+                if DISASM_REGISTER_RE.search(without_addresses) is None:
+                    continue
+                stride = disasm_index_stride(content)
+                for base_address in addresses:
+                    if base_address < min_address:
+                        continue
+                    decl = source_decl_containing_address(base_address, source_ranges, starts)
+                    if decl is None:
+                        continue
+                    range_end = decl.address + (decl.size or 0)
+                    first_indexed_end = base_address + stride + access_size
+                    if first_indexed_end <= range_end:
+                        continue
+                    key = (decl.name, base_address)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    display_path = os.path.relpath(path)
+                    offset = base_address - decl.address
+                    issues.append(Issue(
+                        "ORIGINAL_INDEXED_GLOBAL_ESCAPE",
+                        decl.address,
+                        decl.name,
+                        decl.line,
+                        decl.size or 0,
+                        b"",
+                        None,
+                        f"original indexed access at {display_path}:{line_no}: {line}; "
+                        f"base 0x{base_address:08x} (+0x{offset:x}), stride {stride}, "
+                        f"access size {access_size} can reach 0x{first_indexed_end:08x}, "
+                        f"past source range end 0x{range_end:08x}",
+                    ))
+    return issues
+
+
 def build_rebuilt_layout_issues(decls: List[GlobalDecl],
                                 map_path: str,
                                 min_address: int,
+                                code_dir: str = "",
                                 source_dirs: Sequence[str] = (),
                                 source_excludes: Sequence[str] = (),
                                 ignored_source_paths: Sequence[str] = ()) -> List[Issue]:
@@ -2009,6 +2136,8 @@ def build_rebuilt_layout_issues(decls: List[GlobalDecl],
                 f"but rebuilt symbols are 0x{decl_rebuilt:08x} and 0x{other_rebuilt:08x}; "
                 f"expected 0x{expected:08x}",
             ))
+    if code_dir:
+        issues.extend(find_original_indexed_global_issues(by_addr, code_dir, min_address))
     return issues
 
 
@@ -2328,6 +2457,7 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
             decls,
             inputs.map_path,
             inputs.min_address,
+            inputs.code_dir,
             inputs.source_dirs or (os.path.dirname(inputs.globals_source) or ".",),
             inputs.source_excludes,
             (inputs.globals_source, inputs.globals_h or ""),
