@@ -144,6 +144,7 @@ class GlobalsAuditOptions:
     code_globals_header: str | None = None
     define_headers: tuple[str, ...] = ()
     code_dir: str | None = None
+    asm_dir: str | None = None
     auto_complete: str | None = None
     data_sections: tuple[str, ...] = (".data",)
     min_address: int | None = None
@@ -175,6 +176,7 @@ class GlobalsAuditInputs:
     code_globals_h: str | None
     define_headers: tuple[str, ...]
     code_dir: str
+    asm_dir: str
     auto_complete: str | None
     data_sections: tuple[str, ...]
     min_address: int
@@ -1540,17 +1542,29 @@ def rebuilt_va_for_decl(decl: GlobalDecl,
 
 ADDRESS_OF_NAME_RE = re.compile(r"&\s*([A-Za-z_][A-Za-z0-9_]*)")
 POINTER_CAST_RE = re.compile(r"\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*\*\s*\)")
+POINTER_CAST_BEFORE_ADDRESS_RE = re.compile(
+    r"(?:\*\s*)?\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*\*\s*\)\s*$"
+)
 INT_LITERAL_RE = re.compile(r"0[xX][0-9A-Fa-f]+|\d+")
 DISASM_BRACKET_RE = re.compile(r"\[([^\]]+)\]")
 DISASM_ADDRESS_RE = re.compile(r"(?<![\w])(?:0x)?([0-9A-Fa-f]{6,8})(?![\w])")
 DISASM_REGISTER_RE = re.compile(r"\b(?:e?[abcd]x|e?[sd]i|e?[sb]p|[abcd][hl])\b", re.IGNORECASE)
 DISASM_SCALE_RE = re.compile(r"\*\s*(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+H|\d+)")
 DISASM_PTR_SIZE_RE = re.compile(r"\b(byte|word|dword|qword)\s+ptr\b", re.IGNORECASE)
+REBUILT_SYMBOL_RE = re.compile(
+    r"\?([A-Za-z_][A-Za-z0-9_]*)@@[^\s,\]\+\[]*(?:\+(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+H|\d+))?"
+    r"|(?<![A-Za-z0-9_?@])_([A-Za-z_][A-Za-z0-9_]*)(?:\+(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+H|\d+))?"
+)
 DISASM_PTR_SIZES = {
     "byte": 1,
     "word": 2,
     "dword": 4,
     "qword": 8,
+}
+DISASM_REGISTER_SIZES = {
+    "al": 1, "ah": 1, "bl": 1, "bh": 1, "cl": 1, "ch": 1, "dl": 1, "dh": 1,
+    "ax": 2, "bx": 2, "cx": 2, "dx": 2, "si": 2, "di": 2, "bp": 2, "sp": 2,
+    "eax": 4, "ebx": 4, "ecx": 4, "edx": 4, "esi": 4, "edi": 4, "ebp": 4, "esp": 4,
 }
 
 
@@ -1660,6 +1674,17 @@ def access_size_from_pointer_casts(prefix: str) -> Optional[int]:
         if size is not None and size != 1:
             return size
     return base_type_size(matches[-1].group(1))
+
+
+def access_size_from_pointer_cast_before_address(text: str, address_of_start: int) -> Optional[int]:
+    prefix = text[max(0, address_of_start - 120):address_of_start]
+    match = POINTER_CAST_BEFORE_ADDRESS_RE.search(prefix)
+    if match is None:
+        return None
+    size = base_type_size(match.group(1))
+    if size is None or size <= 1:
+        return None
+    return size
 
 
 def layout_use_is_provably_in_bounds(text: str, match, decl: GlobalDecl) -> bool:
@@ -1890,6 +1915,15 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
             decl = decls_by_name.get(name)
             if decl is None or name in uses:
                 continue
+            cast_size = access_size_from_pointer_cast_before_address(masked, match.start())
+            if cast_size is not None and decl.size is not None and decl.size > 0 and cast_size > decl.size:
+                uses[name] = LayoutSensitiveUse(
+                    name=name,
+                    path=path,
+                    line=masked.count("\n", 0, match.start()) + 1,
+                    context=layout_use_context(text, match.start(), match.end()),
+                )
+                continue
             if decl.dims:
                 if not array_address_use_is_layout_sensitive(masked, match, decl):
                     continue
@@ -1947,6 +1981,84 @@ def disasm_memory_access_size(line: str) -> int:
     return DISASM_PTR_SIZES.get(match.group(1).lower(), 1)
 
 
+def explicit_disasm_memory_access_size(text: str) -> Optional[int]:
+    match = DISASM_PTR_SIZE_RE.search(text)
+    if match is None:
+        return None
+    return DISASM_PTR_SIZES.get(match.group(1).lower(), 1)
+
+
+def split_disasm_operands(text: str) -> List[str]:
+    out: List[str] = []
+    start = 0
+    bracket_depth = 0
+    paren_depth = 0
+    for index, ch in enumerate(text):
+        if ch == "[":
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        elif ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif ch == "," and bracket_depth == 0 and paren_depth == 0:
+            out.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def disasm_instruction_parts(line: str) -> Optional[Tuple[str, List[str]]]:
+    line = line.split(";", 1)[0].strip()
+    if not line or line.startswith(("Function:", "Address:")) or line.endswith(":"):
+        return None
+    rep_match = re.match(r"(rep(?:n?z)?|repne|repe)\s+([A-Za-z]+)\s*(.*)$", line, flags=re.IGNORECASE)
+    if rep_match:
+        return f"{rep_match.group(2).lower()}.{rep_match.group(1).lower()}", split_disasm_operands(rep_match.group(3))
+    match = re.match(r"([A-Za-z.]+)\s*(.*)$", line)
+    if not match:
+        return None
+    return match.group(1).lower(), split_disasm_operands(match.group(2))
+
+
+def disasm_register_operand_size(operand: str) -> Optional[int]:
+    operand = operand.strip().lower()
+    if ":" in operand:
+        operand = operand.rsplit(":", 1)[1].strip()
+    return DISASM_REGISTER_SIZES.get(operand)
+
+
+def inferred_disasm_memory_access_size(line: str,
+                                       operands: Sequence[str],
+                                       operand_index: int) -> Optional[int]:
+    explicit = explicit_disasm_memory_access_size(operands[operand_index])
+    if explicit is not None:
+        return explicit
+    explicit = explicit_disasm_memory_access_size(line)
+    if explicit is not None:
+        return explicit
+    for index, operand in enumerate(operands):
+        if index == operand_index:
+            continue
+        size = disasm_register_operand_size(operand)
+        if size is not None:
+            return size
+    return None
+
+
+def disasm_constant_displacement(text: str) -> int:
+    total = 0
+    for match in re.finditer(r"([+-]?)\s*(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+H|\d+)", text):
+        value = parse_disasm_int_literal(match.group(2))
+        if value is None:
+            continue
+        total += -value if match.group(1) == "-" else value
+    return total
+
+
 def disasm_index_stride(content: str) -> int:
     strides: List[int] = []
     for match in DISASM_SCALE_RE.finditer(content):
@@ -1968,6 +2080,84 @@ def source_decl_containing_address(address: int,
     if decl.address <= address < decl.address + decl.size:
         return decl
     return None
+
+
+def find_original_direct_global_span_issues(decls: Sequence[GlobalDecl],
+                                            code_dir: str,
+                                            min_address: int) -> List[Issue]:
+    if not code_dir or not os.path.isdir(code_dir):
+        return []
+
+    source_ranges = sorted(
+        (
+            decl for decl in decls
+            if not is_cpp_vtable_placeholder(decl.name)
+            and decl.size is not None
+            and decl.size > 0
+        ),
+        key=lambda item: item.address,
+    )
+    starts = [decl.address for decl in source_ranges]
+    issues: List[Issue] = []
+    seen: Set[Tuple[str, int, int]] = set()
+
+    for filename in sorted(os.listdir(code_dir)):
+        if not filename.endswith(".disassembled.txt"):
+            continue
+        path = os.path.join(code_dir, filename)
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for line_no, raw_line in enumerate(lines, 1):
+            line = raw_line.strip()
+            parts = disasm_instruction_parts(line)
+            if parts is None:
+                continue
+            mnemonic, operands = parts
+            if mnemonic == "lea":
+                continue
+            for operand_index, operand in enumerate(operands):
+                for content in DISASM_BRACKET_RE.findall(operand):
+                    addresses = [int(match.group(1), 16) for match in DISASM_ADDRESS_RE.finditer(content)]
+                    if len(addresses) != 1:
+                        continue
+                    without_addresses = DISASM_ADDRESS_RE.sub("", content)
+                    if DISASM_REGISTER_RE.search(without_addresses):
+                        continue
+                    access_size = inferred_disasm_memory_access_size(line, operands, operand_index)
+                    if access_size is None or access_size <= 1:
+                        continue
+                    address = addresses[0] + disasm_constant_displacement(without_addresses)
+                    if address < min_address:
+                        continue
+                    decl = source_decl_containing_address(address, source_ranges, starts)
+                    if decl is None:
+                        continue
+                    range_end = decl.address + (decl.size or 0)
+                    access_end = address + access_size
+                    if access_end <= range_end:
+                        continue
+                    key = (decl.name, address, access_size)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    display_path = os.path.relpath(path)
+                    offset = address - decl.address
+                    issues.append(Issue(
+                        "ORIGINAL_DIRECT_GLOBAL_SPAN",
+                        decl.address,
+                        decl.name,
+                        decl.line,
+                        decl.size or 0,
+                        b"",
+                        None,
+                        f"original direct access at {display_path}:{line_no}: {line}; "
+                        f"base 0x{address:08x} (+0x{offset:x}), access size {access_size} "
+                        f"reaches 0x{access_end:08x}, past source range end 0x{range_end:08x}",
+                    ))
+    return issues
 
 
 def find_original_indexed_global_issues(decls: Sequence[GlobalDecl],
@@ -2001,6 +2191,9 @@ def find_original_indexed_global_issues(decls: Sequence[GlobalDecl],
         for line_no, raw_line in enumerate(lines, 1):
             line = raw_line.strip()
             if not line or line.startswith(("Function:", "Address:")) or line.endswith(":"):
+                continue
+            parts = disasm_instruction_parts(line)
+            if parts is not None and parts[0] == "lea":
                 continue
             access_size = disasm_memory_access_size(line)
             for content in DISASM_BRACKET_RE.findall(line):
@@ -2043,55 +2236,142 @@ def find_original_indexed_global_issues(decls: Sequence[GlobalDecl],
     return issues
 
 
+def parse_rebuilt_asm_offset(text: Optional[str]) -> int:
+    if not text:
+        return 0
+    value = parse_disasm_int_literal(text)
+    return value or 0
+
+
+def rebuilt_symbol_refs_from_operand(operand: str,
+                                     decls_by_name: dict[str, GlobalDecl]) -> List[Tuple[str, int]]:
+    refs: List[Tuple[str, int]] = []
+    for match in REBUILT_SYMBOL_RE.finditer(operand):
+        name = match.group(1) or match.group(3)
+        if name not in decls_by_name:
+            continue
+        refs.append((name, parse_rebuilt_asm_offset(match.group(2) or match.group(4))))
+    return refs
+
+
+def find_rebuilt_asm_global_span_issues(decls: Sequence[GlobalDecl],
+                                        asm_dir: str,
+                                        min_address: int) -> List[Issue]:
+    if not asm_dir or not os.path.isdir(asm_dir):
+        return []
+
+    decls_by_name = {
+        decl.name: decl
+        for decl in decls
+        if decl.address >= min_address
+        and not is_cpp_vtable_placeholder(decl.name)
+        and decl.size is not None
+        and decl.size > 0
+    }
+    if not decls_by_name:
+        return []
+
+    issues: List[Issue] = []
+    seen: Set[Tuple[str, int, int]] = set()
+    for filename in sorted(os.listdir(asm_dir)):
+        if not filename.endswith(".asm"):
+            continue
+        path = os.path.join(asm_dir, filename)
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for line_no, raw_line in enumerate(lines, 1):
+            line = raw_line.strip()
+            parts = disasm_instruction_parts(line)
+            if parts is None:
+                continue
+            mnemonic, operands = parts
+            if mnemonic == "lea":
+                continue
+            for operand_index, operand in enumerate(operands):
+                if "OFFSET FLAT:" in operand.upper():
+                    continue
+                access_size = inferred_disasm_memory_access_size(line, operands, operand_index)
+                if access_size is None or access_size <= 1:
+                    continue
+                for name, offset in rebuilt_symbol_refs_from_operand(operand, decls_by_name):
+                    decl = decls_by_name[name]
+                    if offset < 0 or offset + access_size <= (decl.size or 0):
+                        continue
+                    key = (name, offset, access_size)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    display_path = os.path.relpath(path)
+                    issues.append(Issue(
+                        "REBUILT_GLOBAL_SYMBOL_SPAN",
+                        decl.address,
+                        decl.name,
+                        decl.line,
+                        decl.size or 0,
+                        b"",
+                        None,
+                        f"rebuilt asm access at {display_path}:{line_no}: {line}; "
+                        f"symbol offset 0x{offset:x}, access size {access_size} "
+                        f"reaches 0x{offset + access_size:x}, past source size 0x{decl.size or 0:x}",
+                    ))
+    return issues
+
+
 def build_rebuilt_layout_issues(decls: List[GlobalDecl],
                                 map_path: str,
                                 min_address: int,
                                 code_dir: str = "",
                                 source_dirs: Sequence[str] = (),
                                 source_excludes: Sequence[str] = (),
-                                ignored_source_paths: Sequence[str] = ()) -> List[Issue]:
+                                ignored_source_paths: Sequence[str] = (),
+                                asm_dir: str = "") -> List[Issue]:
+    if code_dir and not isinstance(code_dir, (str, bytes, os.PathLike)):
+        if not source_dirs:
+            source_dirs = code_dir
+        code_dir = ""
     exact, by_address = rebuilt_symbol_indexes(map_path)
-    if not by_address:
-        return []
-
     by_addr = sorted(
         [decl for decl in decls if not is_cpp_vtable_placeholder(decl.name)],
         key=lambda d: d.address,
     )
     issues: List[Issue] = []
-    for i, decl in enumerate(by_addr):
-        if decl.address < min_address or decl.size is None or decl.size <= 0:
-            continue
-        decl_rebuilt = rebuilt_va_for_decl(decl, exact, by_address)
-        if decl_rebuilt is None:
-            continue
-        end = decl.address + decl.size
-        for other in by_addr[i + 1:]:
-            if other.address >= end:
-                break
-            if other.address < min_address:
+    if by_address:
+        for i, decl in enumerate(by_addr):
+            if decl.address < min_address or decl.size is None or decl.size <= 0:
                 continue
-            other_rebuilt = rebuilt_va_for_decl(other, exact, by_address)
-            if other_rebuilt is None:
+            decl_rebuilt = rebuilt_va_for_decl(decl, exact, by_address)
+            if decl_rebuilt is None:
                 continue
-            offset = other.address - decl.address
-            expected = decl_rebuilt + offset
-            if other_rebuilt == expected:
-                continue
-            issues.append(Issue(
-                "REBUILT_LAYOUT_ALIAS_SPLIT",
-                decl.address,
-                decl.name,
-                decl.line,
-                decl.size,
-                b"",
-                None,
-                f"covers {other.name} at 0x{other.address:08x} (+0x{offset:x}), "
-                f"but rebuilt symbols are 0x{decl_rebuilt:08x} and 0x{other_rebuilt:08x}; "
-                f"expected 0x{expected:08x}",
-            ))
+            end = decl.address + decl.size
+            for other in by_addr[i + 1:]:
+                if other.address >= end:
+                    break
+                if other.address < min_address:
+                    continue
+                other_rebuilt = rebuilt_va_for_decl(other, exact, by_address)
+                if other_rebuilt is None:
+                    continue
+                offset = other.address - decl.address
+                expected = decl_rebuilt + offset
+                if other_rebuilt == expected:
+                    continue
+                issues.append(Issue(
+                    "REBUILT_LAYOUT_ALIAS_SPLIT",
+                    decl.address,
+                    decl.name,
+                    decl.line,
+                    decl.size,
+                    b"",
+                    None,
+                    f"covers {other.name} at 0x{other.address:08x} (+0x{offset:x}), "
+                    f"but rebuilt symbols are 0x{decl_rebuilt:08x} and 0x{other_rebuilt:08x}; "
+                    f"expected 0x{expected:08x}",
+                ))
 
-    if source_dirs:
+    if by_address and source_dirs:
         layout_candidate_decls: dict[str, GlobalDecl] = {}
         layout_candidate_next: dict[str, tuple[GlobalDecl, int, int, int]] = {}
         for i, decl in enumerate(by_addr[:-1]):
@@ -2137,7 +2417,10 @@ def build_rebuilt_layout_issues(decls: List[GlobalDecl],
                 f"expected 0x{expected:08x}",
             ))
     if code_dir:
+        issues.extend(find_original_direct_global_span_issues(by_addr, code_dir, min_address))
         issues.extend(find_original_indexed_global_issues(by_addr, code_dir, min_address))
+    if asm_dir:
+        issues.extend(find_rebuilt_asm_global_span_issues(by_addr, asm_dir, min_address))
     return issues
 
 
@@ -2412,6 +2695,7 @@ def resolve_audit_inputs(config: dict[str, Any], target: ProjectTarget, options:
         code_globals_h=options.code_globals_header or target.code_globals_header,
         define_headers=options.define_headers or target.define_headers,
         code_dir=options.code_dir or target.code_dir or "",
+        asm_dir=options.asm_dir or target.asm_dir or "",
         auto_complete=auto_complete,
         data_sections=options.data_sections,
         min_address=min_address,
@@ -2461,6 +2745,7 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
             inputs.source_dirs or (os.path.dirname(inputs.globals_source) or ".",),
             inputs.source_excludes,
             (inputs.globals_source, inputs.globals_h or ""),
+            asm_dir=inputs.asm_dir,
         ))
         issues.sort(key=lambda x: (x.address, x.category, x.name))
     if inputs.max_address is not None:

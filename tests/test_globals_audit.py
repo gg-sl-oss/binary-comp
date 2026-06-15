@@ -197,3 +197,149 @@ def test_globals_audit_verifies_runtime_initializer_copy_source(fixture_root, sa
     )
 
     assert [issue.category for issue in summary.issues] == ["RUNTIME_INIT_SOURCE_MISMATCH"]
+
+
+def test_globals_audit_reports_original_direct_access_spanning_adjacent_global(tmp_path):
+    from conftest import DATA_VA, write_tiny_pe
+
+    original = tmp_path / "original.exe"
+    write_tiny_pe(original, data_overrides={0x10: b"\0\0\0\0"})
+    src_dir = tmp_path / "src"
+    code_dir = tmp_path / "code"
+    src_dir.mkdir()
+    code_dir.mkdir()
+    globals_source = src_dir / "globals.cpp"
+    globals_source.write_text(
+        "short g_PairX_00402010;\n"
+        "short g_PairY_00402012;\n",
+        encoding="utf-8",
+    )
+    (code_dir / "FUN_00401000.disassembled.txt").write_text(
+        "Function: FUN_00401000\n"
+        "Address: 0x00401000\n\n"
+        "MOV EAX,[0x00402010]\n",
+        encoding="utf-8",
+    )
+
+    target = ProjectTarget(
+        name="full",
+        original_exe=str(original),
+        rebuilt_exe=str(original),
+        map_path=str(tmp_path / "empty.map"),
+        source_dirs=(str(src_dir),),
+        globals_source=str(globals_source),
+        code_dir=str(code_dir),
+    )
+    (tmp_path / "empty.map").write_text("", encoding="utf-8")
+
+    summary = audit_globals(
+        {},
+        target,
+        GlobalsAuditOptions(
+            min_address=DATA_VA,
+            check_rebuilt_layout=True,
+            no_auto_complete_global_effects=True,
+        ),
+    )
+
+    assert [(issue.category, issue.name) for issue in summary.issues] == [
+        ("ORIGINAL_DIRECT_GLOBAL_SPAN", "g_PairX_00402010"),
+    ]
+
+
+def test_globals_audit_reports_casted_address_of_adjacent_split(tmp_path):
+    from conftest import DATA_VA, write_tiny_pe
+
+    original = tmp_path / "original.exe"
+    write_tiny_pe(original, data_overrides={0x10: b"\0\0\0\0"})
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    globals_source = src_dir / "globals.cpp"
+    globals_source.write_text(
+        "short g_PairX_00402010;\n"
+        "short g_PairY_00402012;\n",
+        encoding="utf-8",
+    )
+    (src_dir / "use.cpp").write_text(
+        "int read_pair(void) { return *(unsigned int *)&g_PairX_00402010; }\n",
+        encoding="utf-8",
+    )
+    rebuilt_map = tmp_path / "rebuilt.map"
+    rebuilt_map.write_text(
+        " 0003:00000000       _g_PairX_00402010 00500000     <common>\n"
+        " 0003:00000010       _g_PairY_00402012 00500010     <common>\n",
+        encoding="utf-8",
+    )
+
+    target = ProjectTarget(
+        name="full",
+        original_exe=str(original),
+        rebuilt_exe=str(original),
+        map_path=str(rebuilt_map),
+        source_dirs=(str(src_dir),),
+        globals_source=str(globals_source),
+    )
+
+    summary = audit_globals(
+        {},
+        target,
+        GlobalsAuditOptions(
+            min_address=DATA_VA,
+            check_rebuilt_layout=True,
+            no_auto_complete_global_effects=True,
+        ),
+    )
+
+    assert [(issue.category, issue.name) for issue in summary.issues] == [
+        ("REBUILT_LAYOUT_ADJACENT_SPLIT", "g_PairX_00402010"),
+    ]
+
+
+def test_globals_audit_reports_rebuilt_asm_access_spanning_source_global(tmp_path):
+    from conftest import DATA_VA, write_tiny_pe
+
+    original = tmp_path / "original.exe"
+    write_tiny_pe(original, data_overrides={0x10: b"\0\0\0\0"})
+    src_dir = tmp_path / "src"
+    asm_dir = tmp_path / "out"
+    src_dir.mkdir()
+    asm_dir.mkdir()
+    globals_source = src_dir / "globals.cpp"
+    globals_source.write_text(
+        "short g_PairX_00402010;\n"
+        "short g_PairY_00402012;\n",
+        encoding="utf-8",
+    )
+    (asm_dir / "sample.asm").write_text(
+        "_TEXT SEGMENT\n"
+        "_Run PROC NEAR ; Run\n"
+        "    mov eax, DWORD PTR _g_PairX_00402010\n"
+        "_Run ENDP\n"
+        "_TEXT ENDS\n",
+        encoding="utf-8",
+    )
+
+    target = ProjectTarget(
+        name="full",
+        original_exe=str(original),
+        rebuilt_exe=str(original),
+        map_path=str(tmp_path / "empty.map"),
+        source_dirs=(str(src_dir),),
+        globals_source=str(globals_source),
+        asm_dir=str(asm_dir),
+    )
+    (tmp_path / "empty.map").write_text("", encoding="utf-8")
+
+    summary = audit_globals(
+        {},
+        target,
+        GlobalsAuditOptions(
+            min_address=DATA_VA,
+            check_rebuilt_layout=True,
+            no_auto_complete_global_effects=True,
+        ),
+    )
+
+    assert [(issue.category, issue.name) for issue in summary.issues] == [
+        ("REBUILT_GLOBAL_SYMBOL_SPAN", "g_PairX_00402010"),
+    ]

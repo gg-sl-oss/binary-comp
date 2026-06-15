@@ -239,6 +239,7 @@ def add_globals_parser(subparsers) -> None:
     parser.add_argument("--define-header", action="append", dest="define_headers",
                         help="Header to scan for integer #define constants; can be repeated")
     parser.add_argument("--code-dir", help="Code export directory used for function-boundary hints")
+    parser.add_argument("--asm-dir", help="Rebuilt assembly directory used for global span checks")
     parser.add_argument("--auto-complete", help="Function list for global side-effect auditing")
     parser.add_argument("--data-section", action="append", dest="data_sections",
                         help="Writable section to scan for auto-complete side effects; defaults to .data")
@@ -270,7 +271,7 @@ def add_globals_parser(subparsers) -> None:
     parser.add_argument("--source-order-all", action="store_true",
                         help="Warn on source-order decreases for initialized globals too")
     parser.add_argument("--check-rebuilt-layout", action="store_true",
-                        help="Report split rebuilt global layout and original indexed global accesses that escape source ranges")
+                        help="Report split rebuilt global layout and global accesses that escape source ranges")
     parser.add_argument("--fail-on-issues", action="store_true", help="Exit 1 when suspicious issues are found")
     parser.add_argument("--fail-on-warnings", action="store_true",
                         help="Exit 1 when globals without address annotations are found")
@@ -620,6 +621,7 @@ def run_globals(args) -> int:
                 code_globals_header=args.code_globals_header,
                 define_headers=tuple(args.define_headers or ()),
                 code_dir=args.code_dir,
+                asm_dir=args.asm_dir,
                 auto_complete=args.auto_complete,
                 data_sections=tuple(args.data_sections or [".data"]),
                 min_address=args.min_address,
