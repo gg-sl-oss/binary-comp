@@ -44,6 +44,43 @@ def require_capstone() -> None:
         raise RuntimeError("capstone is required. Install with: python3 -m pip install binary-comp[capstone]")
 
 
+def require_capstone_16():
+    """Return a 16-bit real-mode Capstone constructor tuple.
+
+    Kept separate from the 32-bit path so DOS reconstruction helpers can decode
+    raw code images without a PE image wrapper.
+    """
+    try:
+        from capstone import CS_ARCH_X86, CS_MODE_16, Cs as Cs16
+    except ImportError as exc:  # pragma: no cover - optional dependency path
+        raise RuntimeError(
+            "capstone is required. Install with: python3 -m pip install binary-comp[capstone]"
+        ) from exc
+    return Cs16, CS_ARCH_X86, CS_MODE_16
+
+
+def disassemble_raw_16(data: bytes, start: int = 0) -> list[Instruction]:
+    """Disassemble a raw 16-bit code window starting at ``start``.
+
+    The address only labels instructions for display and similarity output; it
+    does not have to be a real load address.
+    """
+    Cs16, CS_ARCH_X86, CS_MODE_16 = require_capstone_16()
+    md = Cs16(CS_ARCH_X86, CS_MODE_16)
+    instructions: list[Instruction] = []
+    for insn in md.disasm(data, start):
+        mnemonic = normalize_mnemonic(insn.mnemonic)
+        instructions.append(Instruction(
+            address=insn.address,
+            mnemonic=mnemonic,
+            op_str=insn.op_str,
+            operands=(),
+            raw=f"{insn.mnemonic} {insn.op_str}".strip(),
+            size=insn.size,
+        ))
+    return instructions
+
+
 def signed32(value: int) -> int:
     value &= 0xFFFFFFFF
     return value - 0x100000000 if value & 0x80000000 else value

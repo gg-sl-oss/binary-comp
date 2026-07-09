@@ -246,10 +246,53 @@ binary-comp global-access --config path/to/binary-comp.json --target full --incl
 binary-comp report --config path/to/binary-comp.json --target full
 binary-comp vtables --config path/to/binary-comp.json --target full --dump
 binary-comp seh --config path/to/binary-comp.json --target full --report
+binary-comp omf-compare --original overlay.bin --original-offset 0x0 --object UNIT.OBJ --size 0x20
+binary-comp tpu-compare --original overlay.bin --original-offset 0x1a40 --tpu UNIT.TPU --block 3
+binary-comp tpu-compare --original PROG.OVR --tpu UNIT.TPU --block 3 --locate
 ```
 
 Most analyzers that read rebuilt code will run the configured build command
 first unless `--no-build` is supplied.
+
+`binary-comp omf-compare` is for 16-bit DOS reconstruction work where the
+rebuilt artifact is an OMF `.OBJ` instead of a linked executable. It compares
+raw original bytes against a selected OMF `LEDATA` range and masks `FIXUPP`
+relocation operands, which is useful for early Borland C/C++ matching before
+the RTLink/link step is modeled.
+
+`binary-comp tpu-compare` is the Turbo Pascal / Borland Pascal counterpart for
+projects whose rebuilt artifact is a compiled unit. It reads a Turbo Pascal 6.0
+`.TPU` file (signature `TPU9`, also used by Turbo Pascal for Windows 1.0),
+extracts the emitted CODE section, and masks the relocation operands that the
+linker fills in (16-bit offsets, segments, and far pointers) before comparing
+against a raw original byte window. Because Turbo Pascal emits one code block
+per routine, `--block N` compares a single routine directly; alternatively
+`--code-offset`/`--size` select an explicit window. When the routine's exact
+offset in the original is unknown — e.g. a routine inside a Turbo Pascal overlay
+(`.OVR`) image, which is a flat concatenation of linked code — `--locate`
+searches the image for the block by content (masking the block's own fixups) and
+reports where it matched. This supports early per-unit Pascal matching before the
+linked `.EXE`/`.OVR` is modeled. A
+`dos16-tpu` target with a `tpu_compare.functions` config list drives the
+`compare` and `report` commands the same way `dos16-omf` does:
+
+```json
+{
+  "targets": { "sample": { "kind": "dos16-tpu", "original_exe": "original.bin", "source_dirs": ["src"] } },
+  "tpu_compare": {
+    "functions": [
+      { "target": "sample", "name": "reset_state", "function": "reset_state",
+        "original": "overlay.bin", "original_offset": "0x1a40", "tpu": "build/UNIT.TPU" }
+    ]
+  }
+}
+```
+
+The compiled block is chosen by `function` (the Pascal routine name), resolved
+against the unit's symbol table. This is robust to source reordering, forward
+declarations, and compiler-emitted helper blocks, and a missing name or a
+truncated `.TPU` produces a clear error instead of a silent mismatch. Set
+`block_index` instead to pin a specific block when name resolution can't apply.
 
 `binary-comp export-asm` is a lightweight replacement for manual Ghidra
 disassembly exports when exact Ghidra recovery is not needed. It writes to

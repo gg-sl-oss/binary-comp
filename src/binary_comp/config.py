@@ -48,6 +48,7 @@ class ProjectTarget:
     library_ranges: tuple[tuple[int, int], ...] = ()
     build: BuildConfig = BuildConfig()
     values_policy: str | None = None
+    kind: str = "pe"
 
 
 def load_json(path: str | os.PathLike[str] | None) -> dict[str, Any]:
@@ -159,6 +160,7 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
     if not isinstance(target_cfg, dict):
         raise ConfigError(f"missing target: {target}")
 
+    kind = optional_string(target_cfg, "kind") or "pe"
     project_build = _build_config(config)
     target_build = _build_config(target_cfg, inherited_jobs=project_build.jobs)
     build = BuildConfig(
@@ -188,17 +190,24 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
         target_cfg.get("source_excludes") or target_cfg.get("source_exclude"),
         f"targets.{target}.source_excludes",
     )
+    if kind in ("dos16-omf", "dos16-tpu"):
+        rebuilt_exe = _resolve_standalone_path(optional_string(target_cfg, "rebuilt_exe"), base) or ""
+        map_path = _resolve_standalone_path(optional_string(target_cfg, "map"), base) or ""
+    else:
+        rebuilt_exe = _resolve_standalone_path(
+            require_string(target_cfg, "rebuilt_exe", f"targets.{target}.rebuilt_exe"),
+            base,
+        ) or ""
+        map_path = _resolve_standalone_path(require_string(target_cfg, "map", f"targets.{target}.map"), base) or ""
+
     return ProjectTarget(
         name=target,
         original_exe=_resolve_standalone_path(
             require_string(target_cfg, "original_exe", f"targets.{target}.original_exe"),
             base,
         ) or "",
-        rebuilt_exe=_resolve_standalone_path(
-            require_string(target_cfg, "rebuilt_exe", f"targets.{target}.rebuilt_exe"),
-            base,
-        ) or "",
-        map_path=_resolve_standalone_path(require_string(target_cfg, "map", f"targets.{target}.map"), base) or "",
+        rebuilt_exe=rebuilt_exe,
+        map_path=map_path,
         source_dirs=_resolve_standalone_paths(source_dirs, base),
         source_excludes=_resolve_standalone_paths(source_excludes, base),
         globals_source=_resolve_standalone_path(optional_string(target_cfg, "globals_source"), base),
@@ -224,6 +233,7 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
         library_ranges=_ranges(target_cfg.get("library_ranges"), f"targets.{target}.library_ranges"),
         build=build,
         values_policy=_resolve_standalone_path(policy, base),
+        kind=kind,
     )
 
 

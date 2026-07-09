@@ -37,6 +37,20 @@ from binary_comp.analyzers.global_access import (
     format_global_access_summary,
 )
 from binary_comp.analyzers.globals import GlobalsAuditOptions, audit_globals, format_report
+from binary_comp.analyzers.omf import (
+    OmfCompareError,
+    compare_omf_config_function,
+    compare_omf_to_original,
+    format_omf_comparison,
+    generate_omf_similarity_report,
+)
+from binary_comp.analyzers.tpu import (
+    TpuCompareError,
+    compare_tpu_config_function,
+    compare_tpu_to_original,
+    format_tpu_comparison,
+    generate_tpu_similarity_report,
+)
 from binary_comp.analyzers.report import (
     SimilarityReportOptions,
     format_similarity_report,
@@ -135,9 +149,59 @@ def add_compare_parser(subparsers) -> None:
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--target", default="full", help="Target name from config (default: full)")
     parser.add_argument("function_name", help="Function name to compare")
-    parser.add_argument("disassembled_code", help="Path to the Ghidra-style disassembly export for the function")
+    parser.add_argument(
+        "disassembled_code",
+        nargs="?",
+        help="Path to the Ghidra-style disassembly export for the function; omitted for dos16-omf/dos16-tpu targets",
+    )
     parser.add_argument("--no-build", action="store_true", help="Use existing rebuilt binary and map")
     parser.set_defaults(handler=run_compare)
+
+
+def add_omf_compare_parser(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "omf-compare",
+        help="Compare raw original bytes against a 16-bit OMF LEDATA record, masking FIXUPP operands",
+    )
+    parser.add_argument("--original", required=True, help="Original raw binary/overlay image")
+    parser.add_argument("--original-offset", required=True, type=lambda value: int(value, 0),
+                        help="Offset in original file/image")
+    parser.add_argument("--object", required=True, dest="object_path", help="Borland/TASM OMF object file")
+    parser.add_argument("--size", type=lambda value: int(value, 0),
+                        help="Byte count to compare; defaults to remaining selected LEDATA")
+    parser.add_argument("--object-offset", type=lambda value: int(value, 0), default=0,
+                        help="Offset within selected LEDATA (default: 0)")
+    parser.add_argument("--segment-index", type=lambda value: int(value, 0),
+                        help="OMF segment index to select (default: first LEDATA)")
+    parser.add_argument("--ledata-index", type=int, default=0,
+                        help="LEDATA record index within selected segment (default: 0)")
+    parser.add_argument("--name", default="omf-function", help="Display name for this comparison")
+    parser.set_defaults(handler=run_omf_compare)
+
+
+def add_tpu_compare_parser(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "tpu-compare",
+        help="Compare raw original bytes against a Turbo Pascal .TPU code block, masking relocation operands",
+    )
+    parser.add_argument("--original", required=True, help="Original raw binary/overlay image")
+    parser.add_argument("--original-offset", type=lambda value: int(value, 0),
+                        help="Offset in original file/image (omit with --locate)")
+    parser.add_argument("--tpu", required=True, dest="tpu_path", help="Turbo Pascal compiled unit (.TPU)")
+    parser.add_argument("--size", type=lambda value: int(value, 0),
+                        help="Byte count to compare; defaults to remaining CODE section or block")
+    parser.add_argument("--code-offset", type=lambda value: int(value, 0), default=0,
+                        help="Offset within the unit's CODE section (default: 0)")
+    parser.add_argument("--block", dest="block_index", type=lambda value: int(value, 0),
+                        help="Compare exactly one code block by index instead of --code-offset/--size")
+    parser.add_argument("--function", dest="function_name",
+                        help="Select the code block by procedure name via the unit's symbol table "
+                             "(robust to source order; overridden by --block)")
+    parser.add_argument("--locate", action="store_true",
+                        help="Find the block in the image by content (masking fixups) instead of --original-offset; "
+                             "for routines inside a Turbo Pascal overlay (.OVR) image")
+    parser.add_argument("--name", default="tpu-function", help="Display name for this comparison")
+    parser.set_defaults(handler=run_tpu_compare)
 
 
 def add_export_asm_parser(subparsers) -> None:
@@ -508,6 +572,31 @@ def run_data(args) -> int:
 def run_compare(args) -> int:
     try:
         config, target = load_project_target(args.config, args.target)
+        if target.kind == "dos16-omf":
+            maybe_build(target, not args.no_build)
+            comparison = compare_omf_config_function(
+                config,
+                args.config,
+                target.name,
+                args.function_name,
+            )
+            print(format_function_comparison(comparison))
+            return 0
+
+        if target.kind == "dos16-tpu":
+            maybe_build(target, not args.no_build)
+            comparison = compare_tpu_config_function(
+                config,
+                args.config,
+                target.name,
+                args.function_name,
+            )
+            print(format_function_comparison(comparison))
+            return 0
+
+        if not args.disassembled_code:
+            print("error: disassembled_code is required for this target", file=sys.stderr)
+            return 2
         comparer = FunctionComparer(
             target,
             canonical_aliases=extract_canonical_aliases(config),
@@ -536,6 +625,50 @@ def run_compare(args) -> int:
 
     print(format_function_comparison(comparison))
     return 0
+
+
+def run_omf_compare(args) -> int:
+    try:
+        comparison = compare_omf_to_original(
+            original_path=args.original,
+            original_offset=args.original_offset,
+            object_path=args.object_path,
+            size=args.size,
+            object_offset=args.object_offset,
+            segment_index=args.segment_index,
+            ledata_index=args.ledata_index,
+            name=args.name,
+        )
+    except (FileNotFoundError, OSError, OmfCompareError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(format_omf_comparison(comparison))
+    return 0 if comparison.matches else 1
+
+
+def run_tpu_compare(args) -> int:
+    if args.original_offset is None and not args.locate:
+        print("error: --original-offset is required unless --locate is given", file=sys.stderr)
+        return 2
+    try:
+        comparison = compare_tpu_to_original(
+            original_path=args.original,
+            original_offset=args.original_offset,
+            tpu_path=args.tpu_path,
+            size=args.size,
+            code_offset=args.code_offset,
+            block_index=args.block_index,
+            function_name=args.function_name,
+            locate=args.locate,
+            name=args.name,
+        )
+    except (FileNotFoundError, OSError, TpuCompareError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(format_tpu_comparison(comparison))
+    return 0 if comparison.matches else 1
 
 
 def resolve_cli_path(config_path: str, path: str | None) -> str | None:
@@ -592,15 +725,18 @@ def run_exe(args) -> int:
 def run_report(args) -> int:
     try:
         config, target = load_project_target(args.config, args.target)
-        report = generate_similarity_report(
-            target,
-            SimilarityReportOptions(
-                build=not args.no_build,
-                canonical_aliases=extract_canonical_aliases(config),
-                file_filter=args.file_filter,
-                signature_overloads=extract_signature_overloads(config),
-            ),
+        options = SimilarityReportOptions(
+            build=not args.no_build,
+            canonical_aliases=extract_canonical_aliases(config),
+            file_filter=args.file_filter,
+            signature_overloads=extract_signature_overloads(config),
         )
+        if target.kind == "dos16-omf":
+            report = generate_omf_similarity_report(config, args.config, target, options)
+        elif target.kind == "dos16-tpu":
+            report = generate_tpu_similarity_report(config, args.config, target, options)
+        else:
+            report = generate_similarity_report(target, options)
     except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -665,6 +801,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_exe_parser(subparsers)
     add_global_access_parser(subparsers)
     add_globals_parser(subparsers)
+    add_omf_compare_parser(subparsers)
+    add_tpu_compare_parser(subparsers)
     add_report_parser(subparsers)
     add_values_parser(subparsers)
     add_vtables_parser(subparsers)
