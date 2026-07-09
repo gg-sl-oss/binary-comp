@@ -49,7 +49,9 @@ from binary_comp.analyzers.tpu import (
     compare_tpu_config_function,
     compare_tpu_to_original,
     format_tpu_comparison,
+    format_tpu_values_report,
     generate_tpu_similarity_report,
+    generate_tpu_values_report,
 )
 from binary_comp.analyzers.report import (
     SimilarityReportOptions,
@@ -80,6 +82,16 @@ def add_values_parser(subparsers) -> None:
         "--include-stack-locals",
         action="store_true",
         help="Also report stack-local memory displacement and stack-store value mismatches",
+    )
+    parser.add_argument(
+        "--show-exact",
+        action="store_true",
+        help="(dos16-tpu) Also list byte-exact functions, not only those with value differences",
+    )
+    parser.add_argument(
+        "--fail-on-diffs",
+        action="store_true",
+        help="(dos16-tpu) Exit non-zero if any located function has an operand/constant difference",
     )
     parser.set_defaults(handler=run_values)
 
@@ -357,7 +369,18 @@ def enabled_kinds_from_args(args) -> frozenset[str]:
 
 def run_values(args) -> int:
     try:
-        _, target = load_project_target(args.config, args.target)
+        config, target = load_project_target(args.config, args.target)
+        if target.kind == "dos16-tpu":
+            report = generate_tpu_values_report(
+                config,
+                args.config,
+                target,
+                SimilarityReportOptions(build=not args.no_build, file_filter=args.file_filter),
+            )
+            print(format_tpu_values_report(report, show_exact=args.show_exact))
+            if args.fail_on_diffs and report.with_diffs:
+                return 1
+            return 0
         policy = load_policy(args.policy or target.values_policy)
         summary = check_values(
             target,

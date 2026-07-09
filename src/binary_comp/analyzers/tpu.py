@@ -39,7 +39,7 @@ from binary_comp.analyzers.function_compare import (
 )
 from binary_comp.analyzers.report import SimilarityReport, SimilarityReportOptions, SimilarityReportRow
 from binary_comp.config import ProjectTarget
-from binary_comp.core.disasm import disassemble_raw_16
+from binary_comp.core.disasm import Instruction, disassemble_raw_16
 
 
 TPU9_SIGNATURE = b"TPU9"
@@ -794,4 +794,165 @@ def format_tpu_comparison(comparison: TpuComparison, context: int = 8) -> str:
         )
     if len(mismatches) > context:
         lines.append(f"    ... {len(mismatches) - context} more")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Operand / constant value check
+#
+# The similarity report scores instruction MNEMONICS only, so two code blocks
+# with the same shape but different immediates ("cmp ax, 0x0d" vs "cmp ax,
+# 0x0f") both score 100%. This check compares the actual bytes -- masking only
+# the relocation fixups, exactly as the byte-locate does -- and decodes every
+# surviving difference back to the instruction it lands in, so a constant that
+# was reconstructed with the wrong value is pointed at directly. It does not
+# touch how similarity is computed; it is a separate, stricter view.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TpuValueDiff:
+    offset: int
+    rebuilt_text: str
+    original_text: str
+
+
+@dataclass(frozen=True)
+class TpuValuesRow:
+    source_file: str
+    function_name: str
+    original_offset: int
+    status: str
+    diffs: tuple[TpuValueDiff, ...]
+
+
+@dataclass(frozen=True)
+class TpuValuesReport:
+    rows: tuple[TpuValuesRow, ...]
+    compared: int
+    byte_exact: int
+    with_diffs: int
+    not_located: int
+    total_diffs: int
+
+
+def _instruction_containing(instructions: list[Instruction], offset: int) -> Instruction | None:
+    for instr in instructions:
+        if instr.address <= offset < instr.address + max(instr.size, 1):
+            return instr
+    return None
+
+
+def _decode_value_diffs(comparison: TpuComparison) -> tuple[TpuValueDiff, ...]:
+    # Disassemble both windows from a zero base so an instruction's address is
+    # its offset within the window, which is how ``mismatches`` are indexed.
+    rebuilt = disassemble_raw_16(comparison.rebuilt, 0)
+    original = disassemble_raw_16(comparison.original, 0)
+    original_by_addr = {instr.address: instr for instr in original}
+    diffs: list[TpuValueDiff] = []
+    seen: set[int] = set()
+    for offset in comparison.mismatches:
+        instr = _instruction_containing(rebuilt, offset)
+        if instr is None or instr.address in seen:
+            continue
+        seen.add(instr.address)
+        match = original_by_addr.get(instr.address)
+        original_text = match.raw if match is not None else "<instruction boundaries differ>"
+        diffs.append(TpuValueDiff(instr.address, instr.raw, original_text))
+    return tuple(diffs)
+
+
+def generate_tpu_values_report(
+    config: dict[str, Any],
+    config_path: str | Path,
+    target: ProjectTarget,
+    options: SimilarityReportOptions = SimilarityReportOptions(),
+) -> TpuValuesReport:
+    from binary_comp.analyzers.function_compare import maybe_build
+
+    maybe_build(target, options.build)
+    rows: list[TpuValuesRow] = []
+    compared = byte_exact = with_diffs = not_located = total_diffs = 0
+
+    for spec in load_tpu_specs(config, config_path, target.name):
+        source_file = tpu_source_file(spec)
+        if (
+            options.file_filter
+            and options.file_filter not in source_file
+            and options.file_filter not in spec.function_name
+            and options.file_filter not in spec.name
+        ):
+            continue
+        try:
+            comparison = compare_tpu_to_original(
+                original_path=spec.original_path,
+                original_offset=spec.original_offset,
+                tpu_path=spec.tpu_path,
+                size=spec.size,
+                code_offset=spec.code_offset,
+                block_index=spec.block_index,
+                function_name=spec.function_name,
+                locate=spec.locate,
+                name=spec.name,
+            )
+        except (FileNotFoundError, OSError, RuntimeError, ValueError, TpuCompareError):
+            not_located += 1
+            rows.append(TpuValuesRow(source_file, spec.function_name, spec.original_offset or 0, "NOT LOCATED", ()))
+            continue
+
+        compared += 1
+        if comparison.matches:
+            byte_exact += 1
+            rows.append(TpuValuesRow(source_file, spec.function_name, comparison.original_offset, "byte-exact", ()))
+            continue
+
+        diffs = _decode_value_diffs(comparison)
+        with_diffs += 1
+        total_diffs += len(diffs)
+        status = f"{len(diffs)} value diff(s) in {len(comparison.mismatches)} byte(s)"
+        rows.append(TpuValuesRow(source_file, spec.function_name, comparison.original_offset, status, diffs))
+
+    return TpuValuesReport(
+        rows=tuple(rows),
+        compared=compared,
+        byte_exact=byte_exact,
+        with_diffs=with_diffs,
+        not_located=not_located,
+        total_diffs=total_diffs,
+    )
+
+
+_BOUNDARY_MARKER = "<instruction boundaries differ>"
+
+
+def format_tpu_values_report(report: TpuValuesReport, *, show_exact: bool = False, max_diffs: int = 12) -> str:
+    lines = ["", "--- Operand Value Check (constants; relocation fixups masked) ---"]
+    current_file = None
+    for row in report.rows:
+        if not show_exact and row.status == "byte-exact":
+            continue
+        if row.source_file != current_file:
+            lines.extend(["", f"=== {row.source_file} ==="])
+            current_file = row.source_file
+        # When most differences are instruction-boundary shifts the two windows no
+        # longer line up: that is a structural divergence (already visible as a low
+        # mnemonic score), not a handful of wrong constants. Flag it so the genuine
+        # constant/operand mismatches stand out.
+        boundary = sum(1 for diff in row.diffs if _BOUNDARY_MARKER in diff.original_text)
+        note = "  [structural: windows misalign]" if row.diffs and boundary * 2 >= len(row.diffs) else ""
+        lines.append(f"  {row.function_name:45s} 0x{row.original_offset:06X}  {row.status}{note}")
+        for diff in row.diffs[:max_diffs]:
+            lines.append(f"      +0x{diff.offset:04x}  rebuilt : {diff.rebuilt_text}")
+            lines.append(f"               original: {diff.original_text}")
+        if len(row.diffs) > max_diffs:
+            lines.append(f"      ... {len(row.diffs) - max_diffs} more")
+
+    lines.extend([
+        "",
+        "--- Summary ---",
+        f"Compared (located): {report.compared}",
+        f"  Byte-exact (constants match): {report.byte_exact}",
+        f"  With value differences: {report.with_diffs}",
+        f"  Not located: {report.not_located}",
+    ])
     return "\n".join(lines)

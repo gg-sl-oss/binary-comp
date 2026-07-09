@@ -294,6 +294,18 @@ declarations, and compiler-emitted helper blocks, and a missing name or a
 truncated `.TPU` produces a clear error instead of a silent mismatch. Set
 `block_index` instead to pin a specific block when name resolution can't apply.
 
+`binary-comp values` also understands `dos16-tpu` targets. The `report`
+similarity score matches instruction *types* only, so a block with the right
+shape but a wrong immediate or stack-frame offset (`sub sp, 4` vs `sub sp,
+0x12`, `cmp ax, 0x0d` vs `cmp ax, 0x0f`) still scores 100%. For a `dos16-tpu`
+target `values` compares the actual bytes — masking only the relocation fixups,
+exactly as the byte-locate does — and decodes every surviving difference back to
+the instruction it lands in, printing rebuilt vs original side by side. It
+reports each located function as byte-exact or lists its operand/constant
+differences (functions whose windows no longer line up are flagged
+`[structural]`). `--fail-on-diffs` exits non-zero for CI; `--filter NAME` scopes
+to one function; `--show-exact` also lists the byte-exact functions.
+
 `binary-comp export-asm` is a lightweight replacement for manual Ghidra
 disassembly exports when exact Ghidra recovery is not needed. It writes to
 `code_export_dir` using the same `FUN_XXXXXXXX.disassembled.txt` convention as

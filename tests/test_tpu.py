@@ -344,3 +344,35 @@ def test_tpu_report_reads_config_entries(tmp_path):
     assert "=== CALLER.PAS ===" in text
     assert "caller" in text
     assert "Average similarity: 100.00%" in text
+
+
+def test_tpu_values_check_flags_constant_that_mnemonic_score_misses(tmp_path):
+    # A wrong immediate ("cmp ax, 0x0d" vs "cmp ax, 0x0f") is invisible to the
+    # mnemonic-only similarity score but must be caught by the value check.
+    pytest.importorskip("capstone")
+    from binary_comp.analyzers.tpu import _decode_value_diffs, compare_tpu_spec, TpuCompareSpec
+
+    original = tmp_path / "original.bin"
+    original.write_bytes(bytes.fromhex("3d 0f 00 cb"))  # cmp ax, 0x0f ; retf
+    tpu = tmp_path / "unit.tpu"
+    tpu.write_bytes(make_tpu([(bytes.fromhex("3d 0d 00 cb"), [])]))  # cmp ax, 0x0d ; retf
+
+    comparison = compare_tpu_to_original(
+        original_path=original, original_offset=0, tpu_path=tpu, name="fn"
+    )
+    # Byte view sees the one differing immediate byte...
+    assert not comparison.matches
+    assert comparison.mismatches == (1,)
+
+    # ...but the mnemonic-only similarity score is 100% (same instruction types).
+    spec = TpuCompareSpec(
+        name="fn", function_name="fn", original_path=str(original),
+        original_offset=0, tpu_path=str(tpu),
+    )
+    assert compare_tpu_spec(spec).similarity >= 99.99
+
+    # The value check decodes the specific offending instruction.
+    diffs = _decode_value_diffs(comparison)
+    assert len(diffs) == 1
+    assert "cmp" in diffs[0].rebuilt_text
+    assert diffs[0].rebuilt_text != diffs[0].original_text
