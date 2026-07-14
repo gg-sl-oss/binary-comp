@@ -320,17 +320,46 @@ def switch_map_source_register(operand: Operand) -> str | None:
     return full_register_name(operand.base or operand.index)
 
 
+def memory_operand_key(operand: Operand) -> tuple[str | None, str | None, int, int] | None:
+    if operand.kind != "mem":
+        return None
+    base = full_register_name(operand.base) if operand.base else None
+    index = full_register_name(operand.index) if operand.index else None
+    return (base, index, operand.scale, unsigned32(operand.disp))
+
+
 def previous_cmp_upper_bound(instrs: list[Instruction], idx: int, reg: str) -> int | None:
+    """Highest index the byte map can be read at, from the `cmp` that bounds it.
+
+    The compare is against the register that indexes the map only when the switch
+    value already lives in one. When it lives in a stack slot -- which is what an
+    unoptimised build produces -- MSVC compares the slot and loads it into the
+    register afterwards, so the bound is on the memory operand, not the register.
+    Track where the register was loaded from and accept either form; missing the
+    second one leaves the byte map to be decoded as instructions, and the garbage
+    decode runs past its end and swallows the first real instruction after it.
+    """
+    loaded_from: set[tuple[str | None, str | None, int, int]] = set()
     for j in range(idx - 1, max(-1, idx - 8), -1):
         instr = instrs[j]
+
+        if instr.mnemonic in {"mov", "movzx", "movsx"} and len(instr.operands) >= 2:
+            dst, src = instr.operands[0], instr.operands[1]
+            if dst.kind == "reg" and full_register_name(dst.reg) == reg:
+                key = memory_operand_key(src)
+                if key is not None:
+                    loaded_from.add(key)
+            continue
+
         if instr.mnemonic != "cmp" or len(instr.operands) < 2:
             continue
         left, right = instr.operands[0], instr.operands[1]
-        if left.kind != "reg" or full_register_name(left.reg) != reg:
-            continue
         if right.kind != "imm" or right.imm < 0:
             continue
-        return right.imm
+        if left.kind == "reg" and full_register_name(left.reg) == reg:
+            return right.imm
+        if left.kind == "mem" and memory_operand_key(left) in loaded_from:
+            return right.imm
     return None
 
 
