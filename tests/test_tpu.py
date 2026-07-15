@@ -324,6 +324,27 @@ def test_tpu_compare_spec_scores_masked_byte_match_as_exact(tmp_path):
     assert comparison.similarity == pytest.approx(100.0)
 
 
+def test_tpu_compare_spec_accepts_exact_non_code_prefix(tmp_path):
+    pytest.importorskip("capstone")
+
+    original = tmp_path / "original.bin"
+    original.write_bytes(b"\x0f")
+    tpu = tmp_path / "unit.tpu"
+    tpu.write_bytes(make_tpu([(b"\x0f", [])]))
+
+    comparison = compare_tpu_spec(TpuCompareSpec(
+        name="data_prefixed_fn",
+        function_name="data_prefixed_fn",
+        original_path=str(original),
+        original_offset=0,
+        tpu_path=str(tpu),
+    ))
+
+    assert comparison.similarity == pytest.approx(100.0)
+    assert comparison.original.instructions == []
+    assert comparison.rebuilt.instructions == []
+
+
 def test_tpu_report_reads_config_entries(tmp_path):
     pytest.importorskip("capstone")
 
