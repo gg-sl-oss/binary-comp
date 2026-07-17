@@ -248,6 +248,99 @@ def disassemble_x86(
     return instructions
 
 
+def disassemble_reachable_x86(
+    image: PEImage,
+    start: int,
+    starts: Iterable[int],
+    max_bytes: int,
+    padding_mnemonics: frozenset[str],
+) -> list[Instruction]:
+    """Decode only instructions reachable from a 32-bit x86 entry point.
+
+    This is useful for call auditing when a linear sweep would decode switch
+    tables, EH metadata, or alignment bytes after an early return as code.  A
+    direct in-range branch is followed, and indexed indirect jumps enqueue the
+    in-range targets stored in their jump table.
+    """
+    require_capstone()
+    section_end = image.section_end_for_va(start)
+    if section_end is None:
+        return []
+    end = next_boundary(starts, start)
+    if end is None or end > section_end:
+        end = section_end
+    end = min(end, start + max_bytes)
+    if end <= start:
+        return []
+
+    md = Cs(CS_ARCH_X86, CS_MODE_32)
+    md.detail = True
+    pending = [start]
+    decoded: dict[int, Instruction] = {}
+
+    def enqueue(address: int) -> None:
+        if start <= address < end and address not in decoded and address not in pending:
+            pending.append(address)
+
+    def enqueue_jump_table(operand: Operand) -> bool:
+        if operand.kind != "mem" or operand.base or not operand.index or operand.scale != 4:
+            return False
+        table = unsigned32(operand.disp)
+        found = False
+        for index in range(4096):
+            raw = image.read(table + index * 4, 4)
+            if raw is None or len(raw) != 4:
+                break
+            target = struct.unpack("<I", raw)[0]
+            if not (start <= target < end):
+                break
+            enqueue(target)
+            found = True
+        return found
+
+    while pending:
+        cursor = pending.pop()
+        while start <= cursor < end and cursor not in decoded:
+            raw = image.read(cursor, min(15, end - cursor))
+            if not raw:
+                break
+            insn = next(md.disasm(raw, cursor, count=1), None)
+            if insn is None or insn.address != cursor:
+                break
+
+            mnemonic = normalize_mnemonic(insn.mnemonic)
+            operands = tuple(make_operand(insn, op) for op in insn.operands)
+            instruction = Instruction(
+                address=insn.address,
+                mnemonic=mnemonic,
+                op_str=insn.op_str,
+                operands=operands,
+                raw=f"{insn.mnemonic} {insn.op_str}".strip(),
+                size=insn.size,
+            )
+            decoded[cursor] = instruction
+            next_addr = cursor + insn.size
+
+            if mnemonic in {"ret", "retf", "iret", "int3", "hlt", "ud2"}:
+                break
+            if mnemonic == "jmp":
+                if operands and operands[0].kind == "imm":
+                    enqueue(unsigned32(operands[0].imm))
+                elif operands:
+                    enqueue_jump_table(operands[0])
+                break
+            if mnemonic.startswith("j") or mnemonic in {"loop", "loope", "loopne"}:
+                if operands and operands[0].kind == "imm":
+                    enqueue(unsigned32(operands[0].imm))
+                cursor = next_addr
+                continue
+            if mnemonic in padding_mnemonics:
+                break
+            cursor = next_addr
+
+    return [decoded[address] for address in sorted(decoded)]
+
+
 def address_in_ranges(address: int, ranges: Iterable[tuple[int, int]]) -> bool:
     return any(start <= address < end for start, end in ranges)
 

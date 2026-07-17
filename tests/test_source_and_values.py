@@ -14,8 +14,10 @@ from binary_comp.analyzers.calls import (
     CallsSummary,
     extract_calls_from_compiled,
     extract_calls_from_original,
+    extract_calls_from_original_instructions,
     format_calls_summary,
     load_calls_policy,
+    merge_call_lists_max,
     normalize_compiled,
     parse_indirect_call,
     policy_with_same_address_aliases,
@@ -356,6 +358,86 @@ JMP      LAB_00401020
     )
 
     assert extract_calls_from_original(str(disasm_path), policy) == ["GetTickCount"]
+
+
+def test_capstone_original_calls_use_same_target_vocabulary(monkeypatch):
+    policy = load_calls_policy({
+        "calls": {
+            "function_pointer_globals": {
+                "0x004B9000": "GlobalCallback",
+            },
+        },
+    })
+    monkeypatch.setattr(
+        "binary_comp.analyzers.calls.IAT_ADDRESSES",
+        {0x004B8000: "GetTickCount"},
+    )
+    instructions = [
+        Instruction(0x401000, "call", "0x402000", (Operand("imm", "", imm=0x402000),), "call 0x402000"),
+        Instruction(
+            0x401005,
+            "call",
+            "dword ptr [eax + 0x18]",
+            (Operand("mem", "", base="eax", disp=0x18),),
+            "call dword ptr [eax + 0x18]",
+        ),
+        Instruction(
+            0x401008,
+            "call",
+            "dword ptr [0x4b8000]",
+            (Operand("mem", "", disp=0x004B8000),),
+            "call dword ptr [0x4b8000]",
+        ),
+        Instruction(
+            0x40100E,
+            "jmp",
+            "dword ptr [0x4b9000]",
+            (Operand("mem", "", disp=0x004B9000),),
+            "jmp dword ptr [0x4b9000]",
+        ),
+        Instruction(
+            0x401014,
+            "jmp",
+            "dword ptr [ecx*4 + 0x401100]",
+            (Operand("mem", "", index="ecx", scale=4, disp=0x00401100),),
+            "jmp dword ptr [ecx*4 + 0x401100]",
+        ),
+    ]
+
+    assert extract_calls_from_original_instructions(instructions, policy) == [
+        0x402000,
+        "indirect[0x18]",
+        "GetTickCount",
+        "GlobalCallback",
+    ]
+
+
+def test_capstone_calls_supplement_overlapping_text_without_double_counting():
+    assert merge_call_lists_max(
+        ["Constructor", "Constructor", "Allocator"],
+        ["Constructor", "Allocator", "Allocator", "SharedTail"],
+    ) == ["Constructor", "Constructor", "Allocator", "Allocator", "SharedTail"]
+
+
+def test_compiled_calls_ignore_exception_unwind_funclet_segment(tmp_path):
+    asm_path = tmp_path / "unwind.asm"
+    asm_path.write_text(
+        """
+_TEXT SEGMENT
+?Run@Thing@@QAEXXZ PROC NEAR ; Thing::Run, COMDAT
+    call ?NormalCall@@YAXXZ ; NormalCall
+    ret 0
+_TEXT ENDS
+text$x SEGMENT
+$Lcleanup:
+    call ?CleanupCall@@YAXXZ ; CleanupCall
+    ret 0
+text$x ENDS
+?Run@Thing@@QAEXXZ ENDP ; Thing::Run
+"""
+    )
+
+    assert extract_calls_from_compiled(str(asm_path), "Thing::Run") == ["NormalCall"]
 
 
 def test_compiled_tail_jump_to_vtable_counts_as_call(tmp_path):

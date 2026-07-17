@@ -12,6 +12,8 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
+from binary_comp.core.disasm import Instruction, disassemble_reachable_x86, unsigned32
+from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import decode_msvc_pointer_class_tokens, normalize_compiled
 from binary_comp.source.cpp import parse_source_function_groups, parse_source_function_markers
 
@@ -44,6 +46,8 @@ class CallsPolicy:
     trivial_tokens: frozenset[str]
     strict_memory_tokens: frozenset[str]
     build_args: tuple[str, ...]
+    use_capstone_original: bool
+    capstone_max_function_bytes: int
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,7 @@ class SelectedFunction:
     # original body was split across addresses.  The call multiset has to be the
     # union of every chunk, not just one of them.
     disasm_paths: tuple[str, ...] = ()
+    original_addrs: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,6 +159,11 @@ def load_calls_policy(config: dict[str, Any]) -> CallsPolicy:
         trivial_tokens=frozenset(str(item) for item in calls.get("trivial_tokens", [])),
         strict_memory_tokens=frozenset(str(item) for item in calls.get("strict_memory_tokens", [])),
         build_args=tuple(str(item) for item in calls.get("build_args", [])),
+        use_capstone_original=bool(calls.get("use_capstone_original", False)),
+        capstone_max_function_bytes=parse_int(
+            calls.get("capstone_max_function_bytes", 0x10000),
+            "calls.capstone_max_function_bytes",
+        ),
     )
 
 
@@ -633,6 +643,113 @@ def extract_calls_from_original(disasm_path: str, policy: CallsPolicy) -> list[s
     return calls
 
 
+def extract_calls_from_original_instructions(
+    instructions: list[Instruction],
+    policy: CallsPolicy,
+) -> list[str | int]:
+    """Extract original call targets from decoded PE instructions.
+
+    The text exports can split one C++ function into overlapping Ghidra
+    functions or omit a shared tail entirely.  Decoding the original image
+    between source-defined function boundaries avoids both failure modes while
+    preserving the same target vocabulary as the text parser.
+    """
+    calls: list[str | int] = []
+    reg_map: dict[str, str] = {}
+
+    for instruction in instructions:
+        operands = instruction.operands
+        if instruction.mnemonic == "mov" and len(operands) == 2:
+            dst, src = operands
+            if dst.kind == "reg":
+                reg = dst.reg.lower()
+                if src.kind == "mem" and not src.base and not src.index:
+                    addr = unsigned32(src.disp)
+                    if is_iat_address(addr):
+                        reg_map[reg] = IAT_ADDRESSES.get(addr, "__import__")
+                    else:
+                        reg_map.pop(reg, None)
+                else:
+                    reg_map.pop(reg, None)
+
+        is_call = instruction.mnemonic == "call"
+        is_jump = instruction.mnemonic == "jmp"
+        if not is_call and not is_jump:
+            continue
+        if not operands:
+            calls.append("__indirect__")
+            continue
+
+        target = operands[0]
+        if target.kind == "imm":
+            if is_call:
+                addr = unsigned32(target.imm)
+                calls.append("__import__" if addr < 0x1000 else addr)
+            continue
+
+        if target.kind == "reg":
+            reg = target.reg.lower()
+            if is_jump and reg not in reg_map:
+                continue
+            calls.append(reg_map.get(reg, "__indirect__"))
+            continue
+
+        if target.kind != "mem":
+            if is_call:
+                calls.append("__indirect__")
+            continue
+
+        if is_jump and not target.base and target.index and target.scale == 4:
+            # Indexed jump-table dispatch is control flow within this function,
+            # not a call through a vtable or callback pointer.
+            continue
+
+        if not target.base and not target.index:
+            addr = unsigned32(target.disp)
+            if is_iat_address(addr):
+                calls.append(IAT_ADDRESSES.get(addr, "__import__"))
+            elif addr in policy.function_pointer_targets:
+                calls.append(policy.function_pointer_targets[addr])
+            elif addr >= 0x400000:
+                calls.append("__funcptr__")
+            elif is_call:
+                calls.append("__indirect__")
+            continue
+
+        if target.base.lower() == "esp":
+            calls.append("__indirect__")
+            continue
+        calls.append(f"indirect[0x{unsigned32(target.disp):x}]")
+
+    return calls
+
+
+def extract_calls_from_original_image(
+    image: PEImage,
+    start: int,
+    function_starts: list[int],
+    policy: CallsPolicy,
+) -> list[str | int]:
+    instructions = disassemble_reachable_x86(
+        image,
+        start,
+        function_starts,
+        policy.capstone_max_function_bytes,
+        frozenset({"nop", "int3"}),
+    )
+    return extract_calls_from_original_instructions(instructions, policy)
+
+
+def merge_call_lists_max(primary: list[str | int], supplemental: list[str | int]) -> list[str | int]:
+    """Merge call multisets without double-counting overlapping exports."""
+    primary_counts = Counter(primary)
+    supplemental_counts = Counter(supplemental)
+    merged = list(primary)
+    for target, count in supplemental_counts.items():
+        merged.extend([target] * max(0, count - primary_counts.get(target, 0)))
+    return merged
+
+
 # decode_msvc_pointer_class_tokens / normalize_compiled now live in
 # binary_comp.core.symbols (shared with the source-to-map matcher); re-exported
 # above via the module import so existing references keep working.
@@ -676,6 +793,13 @@ def extract_calls_from_compiled(
             in_func = True
             continue
 
+        if re.match(r"\S+\s+ENDS\b", stripped, re.IGNORECASE):
+            # With synchronous C++ exception handling MSVC emits the normal
+            # function in _TEXT, closes that segment, then emits unwind
+            # funclets in text$x before writing the final ENDP.  Those funclet
+            # calls are metadata-driven cleanup paths rather than call sites in
+            # the function body being compared.
+            break
         if re.search(r"\bENDP\b", stripped):
             break
         func_lines.append(stripped)
@@ -825,7 +949,15 @@ def select_functions(
                 continue
             asm_path = os.path.join(target.asm_dir, os.path.splitext(os.path.basename(cpp_file))[0] + ".asm")
             functions.append(SelectedFunction(
-                cpp_file, func_name, occurrence_index, addr, paths[-1], asm_path, tuple(paths)))
+                cpp_file,
+                func_name,
+                occurrence_index,
+                addr,
+                paths[-1],
+                asm_path,
+                tuple(paths),
+                tuple(addrs),
+            ))
     return functions, skipped_no_disasm
 
 
@@ -877,6 +1009,13 @@ def check_calls(config: dict[str, Any], target: ProjectTarget, options: CallsOpt
     source_address_issues = collect_source_address_issues(target, policy)
     source_issue_callers: dict[int, set[str]] = {}
     named_addr_map = auto_detect_named_functions(target.code_dir) if target.code_dir else {}
+    original_image = None
+    original_function_starts = sorted(collect_source_address_markers(target, policy))
+    if policy.use_capstone_original:
+        try:
+            original_image = PEImage(target.original_exe)
+        except (OSError, RuntimeError, ValueError):
+            original_image = None
     total_checked = 0
     mismatches = []
 
@@ -886,6 +1025,19 @@ def check_calls(config: dict[str, Any], target: ProjectTarget, options: CallsOpt
         orig_raw = []
         for chunk_path in (function.disasm_paths or (function.disasm_path,)):
             orig_raw.extend(extract_calls_from_original(chunk_path, policy))
+        if original_image is not None:
+            try:
+                image_raw = []
+                for chunk_addr in (function.original_addrs or (function.original_addr,)):
+                    image_raw.extend(extract_calls_from_original_image(
+                        original_image,
+                        chunk_addr,
+                        original_function_starts,
+                        policy,
+                    ))
+                orig_raw = merge_call_lists_max(orig_raw, image_raw)
+            except (OSError, RuntimeError, ValueError):
+                pass
         compiled_raw = extract_calls_from_compiled(
             function.asm_path,
             function.function_name,
