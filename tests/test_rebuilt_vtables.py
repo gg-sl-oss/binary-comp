@@ -38,8 +38,11 @@ def write_rebuilt(tmp_path, slots):
 def write_map(tmp_path, function_symbols):
     """A minimal MSVC map: the vftable in segment 2, functions in segment 1."""
     lines = [" 0002:00000000       ??_7Sample@@6B@            %08X     sample.obj" % DATA_VA]
-    for va, mangled in function_symbols.items():
-        lines.append(" 0001:00000000       %s      %08X f   sample.obj" % (mangled, va))
+    for va, symbols in function_symbols.items():
+        if isinstance(symbols, str):
+            symbols = (symbols,)
+        for mangled in symbols:
+            lines.append(" 0001:00000000       %s      %08X f   sample.obj" % (mangled, va))
     path = tmp_path / "rebuilt.map"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -209,6 +212,21 @@ def test_unknown_rebuilt_symbol_is_unresolved_not_a_failure(tmp_path):
         tmp_path,
         rebuilt_slots=[ALPHA, BETA],
         rebuilt_map={ALPHA: "?Alpha@Sample@@UAEXXZ", BETA: "__purecall"},
+        original_entries=(ORIG_ALPHA, ORIG_BETA),
+    )
+    assert not summary.has_failures
+    assert summary.diffs[0].unresolved == 1
+
+
+def test_purecall_alias_folded_with_source_function_is_unresolved(tmp_path):
+    """ICF must not turn a pure slot into an apparent source-function mismatch."""
+    summary = run(
+        tmp_path,
+        rebuilt_slots=[ALPHA, BETA],
+        rebuilt_map={
+            ALPHA: "?Alpha@Sample@@UAEXXZ",
+            BETA: ("__purecall", "?Gamma@Sample@@UAEXXZ"),
+        },
         original_entries=(ORIG_ALPHA, ORIG_BETA),
     )
     assert not summary.has_failures

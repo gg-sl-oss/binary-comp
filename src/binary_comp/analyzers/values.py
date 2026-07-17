@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
@@ -57,6 +57,8 @@ class CompareContext:
     include_stack_locals: bool
     compiled_diagnostic_targets: frozenset[int]
     original_diagnostic_targets: frozenset[int]
+    compiled_call_targets: dict[int, str] = field(default_factory=dict)
+    original_call_targets: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -188,6 +190,17 @@ def build_diagnostic_targets(function_groups: list[FunctionGroup], policy: Verif
         original_targets.update(group.original_addrs)
         rebuilt_targets.add(group.rebuilt_addr)
     return frozenset(original_targets), frozenset(rebuilt_targets)
+
+
+def build_call_target_names(function_groups: list[FunctionGroup]) -> tuple[dict[int, str], dict[int, str]]:
+    original_targets: dict[int, str] = {}
+    rebuilt_targets: dict[int, str] = {}
+    for group in function_groups:
+        name = canonical_function_name(group.name)
+        for address in group.original_addrs:
+            original_targets[address] = name
+        rebuilt_targets[group.rebuilt_addr] = name
+    return original_targets, rebuilt_targets
 
 
 def load_original_boundary_starts(code_dir: str | None, function_groups: list[FunctionGroup]) -> list[int]:
@@ -796,18 +809,27 @@ def direct_jump_target(instr: Instruction) -> int | None:
     return unsigned32(operand.imm)
 
 
-def call_signature(instr: Instruction) -> tuple | None:
+def call_signature(instr: Instruction, direct_targets: dict[int, str] | None = None) -> tuple | None:
     if instr.mnemonic != "call" or len(instr.operands) != 1:
         return None
     operand = instr.operands[0]
     if operand.kind == "mem":
         return ("mem", operand.index, operand.scale, operand.disp)
     if operand.kind == "imm":
+        if direct_targets:
+            target_name = direct_targets.get(unsigned32(operand.imm))
+            if target_name is not None:
+                return ("direct", target_name)
         return ("direct",)
     return None
 
 
-def following_call_signature(instrs: list[Instruction], idx: int, max_steps: int = 48) -> tuple | None:
+def following_call_signature(
+    instrs: list[Instruction],
+    idx: int,
+    max_steps: int = 48,
+    direct_targets: dict[int, str] | None = None,
+) -> tuple | None:
     by_addr = {instr.address: pos for pos, instr in enumerate(instrs)}
     seen: set[int] = set()
     pos = idx + 1
@@ -819,7 +841,7 @@ def following_call_signature(instrs: list[Instruction], idx: int, max_steps: int
         steps += 1
 
         instr = instrs[pos]
-        signature = call_signature(instr)
+        signature = call_signature(instr, direct_targets)
         if signature is not None:
             return signature
         if instr.mnemonic == "ret":
@@ -841,9 +863,14 @@ def different_following_call(
     original_instrs: list[Instruction],
     ci: int,
     oi: int,
+    context: CompareContext,
 ) -> bool:
-    c_sig = following_call_signature(compiled_instrs, ci)
-    o_sig = following_call_signature(original_instrs, oi)
+    c_sig = following_call_signature(
+        compiled_instrs, ci, direct_targets=context.compiled_call_targets
+    )
+    o_sig = following_call_signature(
+        original_instrs, oi, direct_targets=context.original_call_targets
+    )
     return c_sig is not None and o_sig is not None and c_sig != o_sig
 
 
@@ -905,7 +932,9 @@ def compare_instruction_pair(
         return warnings
     if not comparable_operands(compiled, original):
         return warnings
-    if compiled.mnemonic == "push" and different_following_call(compiled_instrs, original_instrs, ci, oi):
+    if compiled.mnemonic == "push" and different_following_call(
+        compiled_instrs, original_instrs, ci, oi, context
+    ):
         return warnings
     if compare_targets_msvc_eh_state(compiled_instrs, original_instrs, compiled, original, context):
         return warnings
@@ -1148,6 +1177,7 @@ def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesO
 
     groups_by_source = load_source_groups(target.source_dirs, target.map_skip, target.source_excludes)
     mapped_groups, missing_groups, entries_by_obj = map_source_groups(groups_by_source, target.map_path)
+    original_call_targets, rebuilt_call_targets = build_call_target_names(mapped_groups)
 
     if options.file_filter:
         mapped_groups = [
@@ -1177,6 +1207,8 @@ def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesO
         include_stack_locals=options.include_stack_locals,
         compiled_diagnostic_targets=rebuilt_diag_targets,
         original_diagnostic_targets=original_diag_targets,
+        compiled_call_targets=rebuilt_call_targets,
+        original_call_targets=original_call_targets,
     )
 
     total = 0

@@ -381,6 +381,13 @@ def text_after_node_same_line(source: bytes, node) -> str:
     return source[node.end_byte:line_end].decode("utf-8", errors="ignore")
 
 
+def text_on_node_start_line(source: bytes, node) -> str:
+    line_end = source.find(b"\n", node.start_byte)
+    if line_end < 0:
+        line_end = len(source)
+    return source[node.start_byte:line_end].decode("utf-8", errors="ignore")
+
+
 def first_child_of_type(node, type_name: str):
     for child in node.children:
         if child.type == type_name:
@@ -480,6 +487,8 @@ def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None):
 
             comment_context = (
                 text_before_node_comments(source, tree, class_node) +
+                " " +
+                text_on_node_start_line(source, class_node) +
                 " " +
                 text_after_node_same_line(source, class_node)
             )
@@ -930,12 +939,23 @@ def find_constructor_parent_warnings(
             stats["empty_disassembly"] += 1
             continue
 
-        stats["checked"] += 1
         if parent_ctor and parent_ctor in evidence.calls:
+            stats["checked"] += 1
             continue
         if parent_vtable and parent_vtable in evidence.vtable_writes:
+            stats["checked"] += 1
             continue
 
+        # A parent vtable by itself is not enough negative evidence.  MSVC can
+        # elide the intermediate parent-vptr store for a trivial/inlined base
+        # constructor, leaving only the derived vptr write.  Without a known
+        # parent constructor address, there is therefore no call target whose
+        # absence can make the declared hierarchy suspicious.
+        if not parent_ctor:
+            stats["missing_parent_evidence"] += 1
+            continue
+
+        stats["checked"] += 1
         warnings.append({
             "class_name": class_name,
             "parent_name": parent_name,

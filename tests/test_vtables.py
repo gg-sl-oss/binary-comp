@@ -5,6 +5,7 @@ import struct
 
 import pytest
 
+import binary_comp.analyzers.vtables as vtable_analyzer
 from binary_comp.analyzers.vtables import VtableOptions, check_vtables, parse_header_metadata
 from binary_comp.config import load_project_target
 
@@ -172,6 +173,24 @@ public:
     assert explicit_vtables["Trailing"] == DATA_VA
 
 
+def test_opening_class_vtable_comment_is_parsed(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "sample.h").write_text(
+        """
+class Opening { /* vtable 0x00402000 */
+public:
+    virtual ~Opening();
+};
+""",
+        encoding="utf-8",
+    )
+
+    _, _, _, explicit_vtables, _ = parse_header_metadata((str(src),), None)
+
+    assert explicit_vtables["Opening"] == DATA_VA
+
+
 def test_class_metadata_does_not_leak_from_previous_class(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
@@ -197,3 +216,44 @@ public:
     assert constructors["First"] == TEXT_VA
     assert explicit_vtables["Second"] == DATA_VA + 4
     assert "Second" not in constructors
+
+
+def test_constructor_hierarchy_skips_negative_result_without_known_parent_constructor(monkeypatch):
+    classes = {
+        "Base": {
+            "vtable_addr": DATA_VA,
+            "parent": None,
+            "constructor": None,
+        },
+        "Child": {
+            "vtable_addr": DATA_VA + 4,
+            "parent": "Base",
+            "constructor": TEXT_VA,
+        },
+    }
+
+    monkeypatch.setattr(
+        vtable_analyzer,
+        "analyze_constructor",
+        lambda *args, **kwargs: vtable_analyzer.ConstructorEvidence(
+            instruction_count=1,
+            this_reg="ecx",
+            per_reg_vtables={},
+            calls=frozenset(),
+            vtable_writes=frozenset(),
+        ),
+    )
+
+    warnings, stats = vtable_analyzer.find_constructor_parent_warnings(
+        classes,
+        image=None,
+        starts=[],
+        rdata_min=DATA_VA,
+        rdata_max=DATA_VA + 0x20,
+        policy=None,
+        filter_class=None,
+    )
+
+    assert warnings == []
+    assert stats["checked"] == 0
+    assert stats["missing_parent_evidence"] == 1

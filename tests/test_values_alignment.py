@@ -88,3 +88,56 @@ def test_cmp_shifted_immediate_equivalent_branch_condition_stays_quiet():
     ]
 
     assert compare_instruction_pair(compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context) == []
+
+
+def test_push_immediate_mismatch_is_ignored_for_different_resolved_direct_calls():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+        compiled_call_targets={0x1100: "MemReAllocPtr"},
+        original_call_targets={0x2100: "MemDefaultPool"},
+    )
+    compiled = [
+        Instruction(0x1000, "push", "5", (Operand("imm", "5", imm=5),), "push 5"),
+        Instruction(0x1002, "call", "0x1100", (Operand("imm", "0x1100", imm=0x1100),), "call 0x1100"),
+    ]
+    original = [
+        Instruction(0x2000, "push", "0", (Operand("imm", "0", imm=0),), "push 0"),
+        Instruction(0x2002, "call", "0x2100", (Operand("imm", "0x2100", imm=0x2100),), "call 0x2100"),
+    ]
+
+    assert compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context
+    ) == []
+
+
+def test_push_immediate_mismatch_is_kept_for_same_resolved_direct_call():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+        compiled_call_targets={0x1100: "MemAllocPtr"},
+        original_call_targets={0x2100: "MemAllocPtr"},
+    )
+    compiled = [
+        Instruction(0x1000, "push", "5", (Operand("imm", "5", imm=5),), "push 5"),
+        Instruction(0x1002, "call", "0x1100", (Operand("imm", "0x1100", imm=0x1100),), "call 0x1100"),
+    ]
+    original = [
+        Instruction(0x2000, "push", "0", (Operand("imm", "0", imm=0),), "push 0"),
+        Instruction(0x2002, "call", "0x2100", (Operand("imm", "0x2100", imm=0x2100),), "call 0x2100"),
+    ]
+
+    warnings = compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context
+    )
+
+    assert len(warnings) == 1
+    assert warnings[0][0:3] == ("imm", 5, 0)

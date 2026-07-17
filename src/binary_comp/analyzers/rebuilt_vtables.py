@@ -27,6 +27,7 @@ from binary_comp.config import ProjectTarget
 from binary_comp.core.mapfile import parse_msvc_map_symbols
 from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import (
+    PURECALL_SYMBOLS,
     is_destructor_method,
     msvc_method_symbol,
     msvc_vftable_class,
@@ -181,6 +182,13 @@ def _slot_matches(
     function -- a compiler-generated deleting destructor, ``__purecall``, or a
     library thunk. Those are reported as unresolved rather than as failures.
     """
+    # /OPT:ICF can fold __purecall with source functions that have the same
+    # machine code.  Keep the slot unresolved whenever the linker map retains a
+    # purecall alias at this address; otherwise an arbitrary folded source alias
+    # is mistaken for the function selected by the vtable.
+    if PURECALL_SYMBOLS.intersection(symbols_by_va.get(rebuilt_addr, [])):
+        return True, UNKNOWN_NAME, False
+
     resolved = _rebuilt_slot_symbols(rebuilt_addr, symbols_by_va)
     if not resolved:
         return True, UNKNOWN_NAME, False
