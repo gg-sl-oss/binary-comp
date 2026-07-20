@@ -71,6 +71,7 @@ class TpuBlockMatch:
 class TpuScanResult:
     overlay_count: int
     matches: tuple[TpuBlockMatch, ...]
+    units: tuple[str, ...] = ()
 
     @property
     def unique_count(self) -> int:
@@ -379,6 +380,7 @@ def scan_tpu_blocks(
     return TpuScanResult(
         overlay_count=overlay_count,
         matches=matches,
+        units=tuple(sorted({Path(path).stem for path in tpu_paths})),
     )
 
 
@@ -407,8 +409,22 @@ def scan_tpu_directory(
     )
 
 
-def format_tpu_scan(result: TpuScanResult, *, verbose: bool = False) -> str:
+def format_tpu_scan(
+    result: TpuScanResult,
+    *,
+    verbose: bool = False,
+    show_all_units: bool = False,
+) -> str:
     units: dict[str, dict[str, int]] = {}
+    if show_all_units:
+        for unit in result.units:
+            units[unit] = {
+                "examined": 0,
+                "unique": 0,
+                "ambiguous": 0,
+                "missing": 0,
+                "bytes": 0,
+            }
     for match in result.matches:
         row = units.setdefault(
             match.unit,
@@ -440,6 +456,13 @@ def format_tpu_scan(result: TpuScanResult, *, verbose: bool = False) -> str:
         f"{result.exact_bytes} exact byte(s); "
         f"{result.overlay_count} validated overlay unit(s)",
     ))
+    if show_all_units:
+        lines.extend((
+            "",
+            "Coverage note: a unit with every examined source block matched is not "
+            "thereby proven complete; target-only routines are outside the source-side "
+            "denominator. Zero-block units contain no block meeting the scan thresholds.",
+        ))
 
     if verbose:
         lines.append("")
@@ -471,6 +494,7 @@ def format_tpu_scan(result: TpuScanResult, *, verbose: bool = False) -> str:
 def write_tpu_scan_json(result: TpuScanResult, path: str | Path) -> None:
     payload = {
         "overlay_count": result.overlay_count,
+        "units": list(result.units),
         "counts": {
             "examined": len(result.matches),
             "unique": result.unique_count,

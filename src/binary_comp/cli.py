@@ -352,6 +352,11 @@ def add_tpu_scan_parser(subparsers) -> None:
     parser.add_argument("--min-fixed-bytes", type=int, default=8, help="Minimum non-fixup bytes (default: 8)")
     parser.add_argument("--minimum-unique", type=int, default=0, help="Fail if fewer unique blocks are found")
     parser.add_argument("--json", dest="json_path", help="Write the complete match inventory as JSON")
+    parser.add_argument(
+        "--show-all-units",
+        action="store_true",
+        help="Include compiled TPUs with zero examined blocks and explain source-side coverage",
+    )
     parser.add_argument("--verbose", action="store_true", help="List every located block")
     parser.set_defaults(handler=run_tpu_scan)
 
@@ -937,7 +942,11 @@ def run_tpu_scan(args) -> int:
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    print(format_tpu_scan(result, verbose=args.verbose))
+    print(format_tpu_scan(
+        result,
+        verbose=args.verbose,
+        show_all_units=args.show_all_units,
+    ))
     if args.json_path:
         print(f"wrote {args.json_path}")
     return 1 if result.unique_count < args.minimum_unique else 0

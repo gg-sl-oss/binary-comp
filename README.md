@@ -308,7 +308,10 @@ for generated aggregate TPU filename globs. `--resolve-adjacent` assigns an
 otherwise duplicated block only when a consecutive block from the same TPU and
 scan region uniquely anchors it on the left or right; resolution is iterative
 for runs of identical routines and is recorded in JSON. Optional JSON output
-can be retained as generated research data.
+can be retained as generated research data. `--show-all-units` also lists TPUs
+with no block meeting the scan thresholds and prints the important source-side
+coverage caveat: matching every present source block does not prove that the
+source contains every routine present in the target.
 
 `binary-comp tpu-compare` is the Turbo Pascal / Borland Pascal counterpart for
 projects whose rebuilt artifact is a compiled unit. It reads Turbo Pascal 5.0

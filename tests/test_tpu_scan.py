@@ -109,6 +109,23 @@ def test_tpu_scan_uses_explicit_regions_and_reports_missing_blocks(tmp_path):
     assert "1 missing block(s)" in format_tpu_scan(result)
 
 
+def test_tpu_scan_can_report_units_without_scannable_blocks(tmp_path):
+    code = bytes.fromhex("55 89 e5 b8 34 12 5d cb")
+    overlay = b"TPOV" + code
+    executable = encode_mz(bytes(9) + descriptor(4, len(code)))
+    populated = tmp_path / "POPULATED.TPU"
+    empty = tmp_path / "EMPTY.TPU"
+    populated.write_bytes(make_tpu6(code, "DRAW"))
+    empty.write_bytes(make_tpu6(b"\x90" * 5, "EMPTY"))
+
+    result = scan_tpu_blocks(executable, overlay, (populated, empty))
+    report = format_tpu_scan(result, show_all_units=True)
+
+    assert result.units == ("EMPTY", "POPULATED")
+    assert "EMPTY                0       0          0        0            0" in report
+    assert "target-only routines are outside the source-side denominator" in report
+
+
 def test_tpu_scan_resolves_runs_of_identical_blocks_from_adjacency():
     def location(offset: int) -> TpuBlockLocation:
         return TpuBlockLocation(
