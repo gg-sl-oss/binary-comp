@@ -201,6 +201,23 @@ Multiple comments before the same function are allowed. This is useful when
 Ghidra splits one MSVC SEH function into several original chunks but the rebuilt
 compiler emits one function.
 
+When a source function is a behavioral reconstruction of original hand-written
+or inline assembly, place an adjacent `ASM` marker on every function-start
+annotation:
+
+```cpp
+/* Function start: 0x00401000 */ /* ASM */
+void draw_scanline(void)
+{
+    // High-level behavioral reconstruction.
+}
+```
+
+These annotations are omitted from the default similarity and value-comparison
+source inventory, while analyzers that explicitly request every source marker
+can still discover them. The legacy `No assembly extracted` marker remains
+supported for projects where original assembly is genuinely unavailable.
+
 ### Global Annotations
 
 Global data analyzers need original addresses either encoded in symbol names or

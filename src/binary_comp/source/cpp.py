@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_right
 from dataclasses import dataclass
 from string import hexdigits
@@ -15,6 +16,8 @@ CALLING_CONVENTIONS = (
     b"CALLBACK",
     b"WINAPI",
 )
+
+ASM_EXCLUSION_MARKER_RE = re.compile(r"/\*\s*ASM\s*\*/")
 
 
 @dataclass(frozen=True)
@@ -88,7 +91,10 @@ def walk(node):
 
 
 def parse_function_start_comment(text: str, line_text: str, include_no_assembly: bool = False) -> str | None:
-    if not include_no_assembly and "No assembly extracted" in line_text:
+    if not include_no_assembly and (
+        "No assembly extracted" in line_text
+        or ASM_EXCLUSION_MARKER_RE.search(line_text) is not None
+    ):
         return None
     # A scalar/vector deleting destructor (sdtor) is a compiler-generated COMDAT,
     # not part of the source function. When the source documents its address

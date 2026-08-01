@@ -59,6 +59,35 @@ def test_source_function_groups_from_cpp_fixture(fixture_root):
     assert groups[0].addresses == ("00401000",)
 
 
+def test_source_function_groups_exclude_asm_markers(tmp_path):
+    source = tmp_path / "asm.cpp"
+    source.write_text(
+        """
+/* Function start: 0x00401000 */ /* ASM */
+void asm_function() {}
+/* Function start: 0x00402000 */ /* No assembly extracted */
+void unavailable_function() {}
+/* Function start: 0x00403000 */
+void c_function() {}
+""",
+        encoding="utf-8",
+    )
+
+    groups = parse_source_function_groups(str(source))
+
+    assert [(group.name, group.addresses) for group in groups] == [
+        ("c_function", ("00403000",)),
+    ]
+
+    all_groups = parse_source_function_groups(str(source), include_no_assembly=True)
+
+    assert [(group.name, group.addresses) for group in all_groups] == [
+        ("asm_function", ("00401000",)),
+        ("unavailable_function", ("00402000",)),
+        ("c_function", ("00403000",)),
+    ]
+
+
 def test_source_function_groups_can_add_configured_signatures(tmp_path):
     source = tmp_path / "overload.cpp"
     source.write_text(
