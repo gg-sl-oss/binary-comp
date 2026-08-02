@@ -437,6 +437,10 @@ def writes_register(instr: Instruction, reg: str) -> bool:
     return operand.kind == "reg" and operand.reg == reg
 
 
+def is_control_flow_boundary(instr: Instruction) -> bool:
+    return instr.mnemonic == "ret" or is_branch_or_call(instr.mnemonic)
+
+
 def stack_slot_key(operand: Operand, policy: VerifierPolicy) -> tuple[str, int] | None:
     if operand.kind != "mem" or operand.base not in policy.stack_registers or operand.index:
         return None
@@ -1439,6 +1443,358 @@ def equivalent_structurally_reordered_displacements(
     )
 
 
+def recent_register_memory_source(
+    instrs: list[Instruction],
+    idx: int,
+    register: str,
+    max_steps: int = 8,
+) -> Operand | None:
+    """Return the memory operand most recently loaded into ``register``."""
+    register = full_register_name(register)
+    for candidate in reversed(instrs[max(0, idx - max_steps):idx]):
+        if is_control_flow_boundary(candidate):
+            return None
+        if not candidate.operands:
+            continue
+        destination = candidate.operands[0]
+        if destination.kind != "reg" or full_register_name(destination.reg) != register:
+            continue
+        if candidate.mnemonic == "mov" and len(candidate.operands) >= 2:
+            source = candidate.operands[1]
+            if source.kind == "mem":
+                return source
+        return None
+    return None
+
+
+def same_expression_object(
+    instrs: list[Instruction],
+    first_idx: int,
+    first: Operand,
+    second_idx: int,
+    second: Operand,
+) -> bool:
+    if not first.base or not second.base:
+        return False
+    if full_register_name(first.base) == full_register_name(second.base):
+        register = full_register_name(first.base)
+        lower_idx, upper_idx = sorted((first_idx, second_idx))
+        for instr in instrs[lower_idx:upper_idx]:
+            if is_control_flow_boundary(instr):
+                return False
+            if (
+                instr.operands
+                and instr.operands[0].kind == "reg"
+                and full_register_name(instr.operands[0].reg) == register
+            ):
+                return False
+        return True
+    first_source = recent_register_memory_source(instrs, first_idx, first.base)
+    second_source = recent_register_memory_source(instrs, second_idx, second.base)
+    if first_source is None or second_source is None:
+        return False
+    return (
+        first_source.base,
+        first_source.index,
+        first_source.scale,
+        first_source.disp,
+        first_source.size,
+    ) == (
+        second_source.base,
+        second_source.index,
+        second_source.scale,
+        second_source.disp,
+        second_source.size,
+    )
+
+
+def nearby_commutative_member_expressions(
+    instrs: list[Instruction],
+    center: int,
+    policy: VerifierPolicy,
+    radius: int = 6,
+) -> set[tuple[str, tuple[tuple[int, int], tuple[int, int]]]]:
+    """Describe two-field same-object additions/multiplications near ``center``."""
+    expressions: set[
+        tuple[str, tuple[tuple[int, int], tuple[int, int]]]
+    ] = set()
+    first_start = max(0, center - radius)
+    for first_idx in range(first_start, min(center + 1, len(instrs))):
+        first_instr = instrs[first_idx]
+        if first_instr.mnemonic != "mov" or len(first_instr.operands) < 2:
+            continue
+        accumulator, first = first_instr.operands[:2]
+        if accumulator.kind != "reg" or first.kind != "mem":
+            continue
+        if first.base in policy.stack_registers or not member_displacement(first.disp, policy):
+            continue
+        accumulator_name = full_register_name(accumulator.reg)
+        end = min(len(instrs), first_idx + radius + 1)
+        for second_idx in range(first_idx + 1, end):
+            second_instr = instrs[second_idx]
+            if len(second_instr.operands) >= 2:
+                destination, second = second_instr.operands[:2]
+                if (
+                    second_instr.mnemonic in {"add", "imul"}
+                    and destination.kind == "reg"
+                    and full_register_name(destination.reg) == accumulator_name
+                    and second.kind == "mem"
+                    and second.base not in policy.stack_registers
+                    and member_displacement(second.disp, policy)
+                    and center in {first_idx, second_idx}
+                    and same_expression_object(
+                        instrs, first_idx, first, second_idx, second
+                    )
+                ):
+                    expressions.add((
+                        second_instr.mnemonic,
+                        tuple(sorted((
+                            (first.disp, first.size),
+                            (second.disp, second.size),
+                        ))),
+                    ))
+            if writes_register(second_instr, accumulator.reg):
+                break
+    return expressions
+
+
+def equivalent_commutative_member_expression(
+    compiled_instrs: list[Instruction],
+    original_instrs: list[Instruction],
+    ci: int,
+    oi: int,
+    policy: VerifierPolicy,
+) -> bool:
+    compiled = nearby_commutative_member_expressions(compiled_instrs, ci, policy)
+    if not compiled:
+        return False
+    original = nearby_commutative_member_expressions(original_instrs, oi, policy)
+    return bool(compiled & original)
+
+
+def comparison_relation(mnemonic: str) -> str | None:
+    aliases = {
+        "je": "eq",
+        "jz": "eq",
+        "jne": "ne",
+        "jnz": "ne",
+        "jl": "lt",
+        "jnge": "lt",
+        "jle": "le",
+        "jng": "le",
+        "jg": "gt",
+        "jnle": "gt",
+        "jge": "ge",
+        "jnl": "ge",
+        "jb": "ltu",
+        "jnae": "ltu",
+        "jbe": "leu",
+        "jna": "leu",
+        "ja": "gtu",
+        "jnbe": "gtu",
+        "jae": "geu",
+        "jnb": "geu",
+    }
+    return aliases.get(mnemonic.lower())
+
+
+def reverse_comparison_relation(relation: str) -> str:
+    return {
+        "eq": "eq",
+        "ne": "ne",
+        "lt": "gt",
+        "le": "ge",
+        "gt": "lt",
+        "ge": "le",
+        "ltu": "gtu",
+        "leu": "geu",
+        "gtu": "ltu",
+        "geu": "leu",
+    }[relation]
+
+
+def integer_comparison_interval(
+    relation: str,
+    value: int,
+) -> tuple[int, int] | None:
+    """Return the inclusive integer interval selected by a comparison branch."""
+    if relation.endswith("u"):
+        minimum, maximum = 0, 0xFFFFFFFF
+        value = unsigned32(value)
+        relation = relation[:-1]
+    else:
+        minimum, maximum = -0x80000000, 0x7FFFFFFF
+        value = signed32(value)
+
+    if relation == "eq":
+        return value, value
+    if relation == "lt":
+        return minimum, value - 1
+    if relation == "le":
+        return minimum, value
+    if relation == "gt":
+        return value + 1, maximum
+    if relation == "ge":
+        return value, maximum
+    return None
+
+
+def complementary_integer_intervals(
+    left: tuple[int, int],
+    right: tuple[int, int],
+) -> bool:
+    return (
+        left[0] == right[1] + 1
+        and right[0] in {0, -0x80000000}
+        and left[1] in {0x7FFFFFFF, 0xFFFFFFFF}
+    ) or (
+        right[0] == left[1] + 1
+        and left[0] in {0, -0x80000000}
+        and right[1] in {0x7FFFFFFF, 0xFFFFFFFF}
+    )
+
+
+def equivalent_integer_compare_conditions(
+    compiled_instrs: list[Instruction],
+    original_instrs: list[Instruction],
+    ci: int,
+    oi: int,
+    compiled_value: int,
+    original_value: int,
+    policy: VerifierPolicy,
+) -> bool:
+    """Recognize adjacent-bound spellings of the same integer condition."""
+    compiled = compiled_instrs[ci]
+    original = original_instrs[oi]
+    if compiled.mnemonic != "cmp" or original.mnemonic != "cmp":
+        return False
+    if len(compiled.operands) < 2 or len(original.operands) < 2:
+        return False
+    if compiled.operands[1].kind != "imm" or original.operands[1].kind != "imm":
+        return False
+    c_branch = next_instruction(compiled_instrs, ci)
+    o_branch = next_instruction(original_instrs, oi)
+    if c_branch is None or o_branch is None:
+        return False
+    c_relation = comparison_relation(c_branch.mnemonic)
+    o_relation = comparison_relation(o_branch.mnemonic)
+    if c_relation is None or o_relation is None:
+        return False
+    if c_relation.endswith("u") != o_relation.endswith("u"):
+        return False
+    c_interval = integer_comparison_interval(c_relation, compiled_value)
+    o_interval = integer_comparison_interval(o_relation, original_value)
+    if c_interval is None or o_interval is None:
+        return False
+    if c_interval == o_interval:
+        return True
+    if not complementary_integer_intervals(c_interval, o_interval):
+        return False
+    return equivalent_reordered_branch_layout(
+        compiled_instrs,
+        original_instrs,
+        ci + 1,
+        oi + 1,
+        policy,
+    )
+
+
+def loaded_member_before_compare(
+    instrs: list[Instruction],
+    compare_idx: int,
+    register: str,
+    policy: VerifierPolicy,
+    max_steps: int = 6,
+) -> tuple[int, Operand] | None:
+    register = full_register_name(register)
+    for idx in range(compare_idx - 1, max(-1, compare_idx - max_steps - 1), -1):
+        instr = instrs[idx]
+        if is_control_flow_boundary(instr):
+            return None
+        if not instr.operands:
+            continue
+        destination = instr.operands[0]
+        if destination.kind != "reg" or full_register_name(destination.reg) != register:
+            continue
+        if instr.mnemonic == "mov" and len(instr.operands) >= 2:
+            source = instr.operands[1]
+            if (
+                source.kind == "mem"
+                and source.base not in policy.stack_registers
+                and member_displacement(source.disp, policy)
+            ):
+                return idx, source
+        return None
+    return None
+
+
+def nearby_same_object_member_comparisons(
+    instrs: list[Instruction],
+    center: int,
+    policy: VerifierPolicy,
+    radius: int = 6,
+) -> set[tuple[tuple[tuple[int, int], tuple[int, int]], str]]:
+    comparisons: set[
+        tuple[tuple[tuple[int, int], tuple[int, int]], str]
+    ] = set()
+    start = max(0, center - radius)
+    end = min(len(instrs), center + radius + 1)
+    for compare_idx in range(start, end):
+        compare = instrs[compare_idx]
+        if compare.mnemonic != "cmp" or len(compare.operands) < 2:
+            continue
+        left, right = compare.operands[:2]
+        if (
+            left.kind != "mem"
+            or left.base in policy.stack_registers
+            or not member_displacement(left.disp, policy)
+            or right.kind != "reg"
+        ):
+            continue
+        loaded = loaded_member_before_compare(
+            instrs, compare_idx, right.reg, policy
+        )
+        if loaded is None:
+            continue
+        load_idx, right_member = loaded
+        if not same_expression_object(
+            instrs, compare_idx, left, load_idx, right_member
+        ):
+            continue
+        branch = next_instruction(instrs, compare_idx)
+        if branch is None:
+            continue
+        relation = comparison_relation(branch.mnemonic)
+        if relation is None:
+            continue
+        left_field = (left.disp, left.size)
+        right_field = (right_member.disp, right_member.size)
+        fields = tuple(sorted((left_field, right_field)))
+        if left_field != fields[0]:
+            relation = reverse_comparison_relation(relation)
+        if center in {load_idx, compare_idx}:
+            comparisons.add((fields, relation))
+    return comparisons
+
+
+def equivalent_same_object_member_comparison(
+    compiled_instrs: list[Instruction],
+    original_instrs: list[Instruction],
+    ci: int,
+    oi: int,
+    policy: VerifierPolicy,
+) -> bool:
+    compiled = nearby_same_object_member_comparisons(
+        compiled_instrs, ci, policy
+    )
+    if not compiled:
+        return False
+    original = nearby_same_object_member_comparisons(
+        original_instrs, oi, policy
+    )
+    return bool(compiled & original)
+
+
 def has_structurally_relocated_effective_address(
     source_instrs: list[Instruction],
     source_idx: int,
@@ -1620,6 +1976,199 @@ def x87_status_test_mask(instrs: list[Instruction], idx: int) -> int | None:
     return mask.imm
 
 
+def x87_memory_fingerprint(
+    operand: Operand,
+    image: PEImage,
+    policy: VerifierPolicy,
+) -> tuple | None:
+    if operand.kind != "mem":
+        return None
+    if operand.base in policy.stack_registers:
+        return ("stack", operand.size)
+    if not operand.base and not operand.index:
+        size = operand.size or 8
+        reader = getattr(image, "read", None)
+        data = reader(unsigned32(operand.disp), size) if reader is not None else None
+        if data is None:
+            return None
+        return ("absolute", size, data)
+    return ("member", operand.disp, operand.size)
+
+
+def x87_expression_signature(
+    instrs: list[Instruction],
+    start: int,
+    end: int,
+    image: PEImage,
+    policy: VerifierPolicy,
+) -> tuple | None:
+    operations = [
+        instr
+        for instr in instrs[start:end]
+        if instr.mnemonic.startswith("f")
+        and instr.mnemonic not in {"fnstsw", "fwait"}
+    ]
+    if not operations or operations[0].mnemonic not in {"fld", "fild", "fld1", "fldz"}:
+        return None
+    if any(instr.mnemonic in {"fxch", "fstp", "fistp"} for instr in operations):
+        return None
+
+    def memory(instr: Instruction) -> tuple | None:
+        for operand in instr.operands:
+            if operand.kind == "mem":
+                return x87_memory_fingerprint(operand, image, policy)
+        return None
+
+    loaded = memory(operations[0])
+    if operations[0].mnemonic in {"fld1", "fldz"}:
+        loaded = (operations[0].mnemonic,)
+    if loaded is None:
+        return None
+    if len(operations) == 1:
+        return ("value", loaded)
+    if len(operations) == 2 and operations[1].mnemonic in {"fadd", "fmul"}:
+        other = memory(operations[1])
+        if other is None:
+            return None
+        return (
+            "commutative",
+            operations[1].mnemonic,
+            tuple(sorted((loaded, other), key=repr)),
+        )
+    signature = []
+    for instr in operations:
+        signature.append((instr.mnemonic, memory(instr)))
+    return ("ordered", tuple(signature))
+
+
+def x87_comparison_operands(
+    instrs: list[Instruction],
+    test_idx: int,
+    image: PEImage,
+    policy: VerifierPolicy,
+) -> tuple[tuple, tuple] | None:
+    compare_idx = None
+    for idx in range(test_idx - 2, max(-1, test_idx - 6), -1):
+        if is_control_flow_boundary(instrs[idx]):
+            return None
+        if instrs[idx].mnemonic in {"fcom", "fcomp", "fcompp", "fucom", "fucomp", "fucompp"}:
+            compare_idx = idx
+            break
+    if compare_idx is None:
+        return None
+    compare = instrs[compare_idx]
+    window_start = max(0, compare_idx - 24)
+    for idx in range(compare_idx - 1, window_start - 1, -1):
+        if is_control_flow_boundary(instrs[idx]):
+            window_start = idx + 1
+            break
+    load_indices = [
+        idx
+        for idx in range(window_start, compare_idx)
+        if instrs[idx].mnemonic in {"fld", "fild", "fld1", "fldz"}
+    ]
+    if compare.mnemonic.endswith("pp"):
+        if len(load_indices) < 2:
+            return None
+        first_idx, second_idx = load_indices[-2:]
+        first = x87_expression_signature(
+            instrs, first_idx, second_idx, image, policy
+        )
+        second = x87_expression_signature(
+            instrs, second_idx, compare_idx, image, policy
+        )
+        if first is None or second is None:
+            return None
+        return second, first
+
+    memory_operand = next(
+        (operand for operand in compare.operands if operand.kind == "mem"),
+        None,
+    )
+    if memory_operand is None or not load_indices:
+        return None
+    left = x87_expression_signature(
+        instrs, load_indices[-1], compare_idx, image, policy
+    )
+    right_memory = x87_memory_fingerprint(memory_operand, image, policy)
+    if left is None or right_memory is None:
+        return None
+    return left, ("value", right_memory)
+
+
+def x87_taken_relation(mask: int, branch: str) -> str | None:
+    branch = branch.lower()
+    if mask == 1:
+        if branch in {"jne", "jnz"}:
+            return "lt"
+        if branch in {"je", "jz"}:
+            return "ge"
+    if mask == 0x41:
+        if branch in {"jne", "jnz"}:
+            return "le"
+        if branch in {"je", "jz"}:
+            return "gt"
+    return None
+
+
+def reverse_relation(relation: str) -> str:
+    return {"lt": "gt", "le": "ge", "gt": "lt", "ge": "le"}[relation]
+
+
+def complementary_relation(relation: str) -> str:
+    return {"lt": "ge", "le": "gt", "gt": "le", "ge": "lt"}[relation]
+
+
+def equivalent_reversed_x87_comparison(
+    compiled_instrs: list[Instruction],
+    original_instrs: list[Instruction],
+    compiled_image: PEImage,
+    original_image: PEImage,
+    ci: int,
+    oi: int,
+    policy: VerifierPolicy,
+) -> bool:
+    c_mask = x87_status_test_mask(compiled_instrs, ci)
+    o_mask = x87_status_test_mask(original_instrs, oi)
+    if {c_mask, o_mask} != {1, 0x41}:
+        return False
+    c_branch = next_instruction(compiled_instrs, ci)
+    o_branch = next_instruction(original_instrs, oi)
+    if c_branch is None or o_branch is None:
+        return False
+    c_relation = x87_taken_relation(c_mask, c_branch.mnemonic)
+    o_relation = x87_taken_relation(o_mask, o_branch.mnemonic)
+    if c_relation is None or o_relation is None:
+        return False
+    c_operands = x87_comparison_operands(
+        compiled_instrs, ci, compiled_image, policy
+    )
+    o_operands = x87_comparison_operands(
+        original_instrs, oi, original_image, policy
+    )
+    if c_operands is None or o_operands is None:
+        return False
+    reversed_operands = (
+        c_operands[0] == o_operands[1]
+        and c_operands[1] == o_operands[0]
+    )
+    same_order = c_operands == o_operands
+    if not reversed_operands or same_order:
+        return False
+    normalized_original = reverse_relation(o_relation)
+    if c_relation == normalized_original:
+        return True
+    if c_relation != complementary_relation(normalized_original):
+        return False
+    return equivalent_reordered_branch_layout(
+        compiled_instrs,
+        original_instrs,
+        ci + 1,
+        oi + 1,
+        policy,
+    )
+
+
 def equivalent_reordered_x87_status_masks(
     compiled_instrs: list[Instruction],
     original_instrs: list[Instruction],
@@ -1798,6 +2347,75 @@ def equivalent_low_word_mask(
     ) and masked_register_only_stored_as_word(
         original_instrs, oi, o_dst.reg
     )
+
+
+def signed32(value: int) -> int:
+    value = unsigned32(value)
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def nearby_register_shift(
+    instrs: list[Instruction],
+    idx: int,
+    register: str,
+    direction: int,
+    max_steps: int = 3,
+) -> int | None:
+    register = full_register_name(register)
+    for step in range(1, max_steps + 1):
+        candidate_idx = idx + direction * step
+        if candidate_idx < 0 or candidate_idx >= len(instrs):
+            break
+        candidate = instrs[candidate_idx]
+        if is_control_flow_boundary(candidate):
+            break
+        if (
+            candidate.mnemonic == "sar"
+            and len(candidate.operands) >= 2
+            and candidate.operands[0].kind == "reg"
+            and full_register_name(candidate.operands[0].reg) == register
+            and candidate.operands[1].kind == "imm"
+        ):
+            return candidate.operands[1].imm
+        if writes_register(candidate, register):
+            break
+    return None
+
+
+def equivalent_mask_moved_across_arithmetic_shift(
+    compiled_instrs: list[Instruction],
+    original_instrs: list[Instruction],
+    ci: int,
+    oi: int,
+    compiled_value: int,
+    original_value: int,
+) -> bool:
+    compiled = compiled_instrs[ci]
+    original = original_instrs[oi]
+    if compiled.mnemonic != "and" or original.mnemonic != "and":
+        return False
+    if not compiled.operands or not original.operands:
+        return False
+    c_dst = compiled.operands[0]
+    o_dst = original.operands[0]
+    if c_dst.kind != "reg" or o_dst.kind != "reg":
+        return False
+    if full_register_name(c_dst.reg) != full_register_name(o_dst.reg):
+        return False
+
+    c_before = nearby_register_shift(compiled_instrs, ci, c_dst.reg, -1)
+    o_after = nearby_register_shift(original_instrs, oi, o_dst.reg, 1)
+    if c_before is not None and c_before == o_after:
+        shifted = unsigned32(signed32(original_value) >> c_before)
+        if shifted == unsigned32(compiled_value):
+            return True
+
+    c_after = nearby_register_shift(compiled_instrs, ci, c_dst.reg, 1)
+    o_before = nearby_register_shift(original_instrs, oi, o_dst.reg, -1)
+    if c_after is not None and c_after == o_before:
+        shifted = unsigned32(signed32(compiled_value) >> c_after)
+        return shifted == unsigned32(original_value)
+    return False
 
 
 def is_stack_adjustment(instr: Instruction) -> bool:
@@ -2663,10 +3281,39 @@ def compare_instruction_pair(
             o_op.imm,
         ):
             continue
+        if equivalent_mask_moved_across_arithmetic_shift(
+            compiled_instrs,
+            original_instrs,
+            ci,
+            oi,
+            c_op.imm,
+            o_op.imm,
+        ):
+            continue
+        if equivalent_integer_compare_conditions(
+            compiled_instrs,
+            original_instrs,
+            ci,
+            oi,
+            c_op.imm,
+            o_op.imm,
+            context.policy,
+        ):
+            continue
         if equivalent_sign_step_masks(compiled_instrs, original_instrs, ci, oi):
             continue
         if equivalent_reordered_x87_status_masks(
             compiled_instrs, original_instrs, ci, oi
+        ):
+            continue
+        if equivalent_reversed_x87_comparison(
+            compiled_instrs,
+            original_instrs,
+            compiled_image,
+            original_image,
+            ci,
+            oi,
+            context.policy,
         ):
             continue
         if same_effective_register_immediate(
@@ -2745,6 +3392,22 @@ def compare_instruction_pair(
                 idx,
                 c_op,
                 o_op,
+            ):
+                continue
+            if equivalent_commutative_member_expression(
+                compiled_instrs,
+                original_instrs,
+                ci,
+                oi,
+                context.policy,
+            ):
+                continue
+            if equivalent_same_object_member_comparison(
+                compiled_instrs,
+                original_instrs,
+                ci,
+                oi,
+                context.policy,
             ):
                 continue
             if equivalent_shifted_literal_pointer_base(

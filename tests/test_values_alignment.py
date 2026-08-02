@@ -33,6 +33,17 @@ class StringsImage:
         return self.strings.get(address)
 
 
+class MemoryImage(NoStringsImage):
+    def __init__(self, memory):
+        self.memory = memory
+
+    def read(self, address, size):
+        data = self.memory.get(address)
+        if data is None or len(data) < size:
+            return None
+        return data[:size]
+
+
 def instruction(address, mnemonic, operands=()):
     raw_operands = ", ".join(operand.text for operand in operands)
     raw = f"{mnemonic} {raw_operands}".rstrip()
@@ -53,6 +64,10 @@ def immediate(value):
 
 def member_memory(base, displacement, size=4):
     return Operand("mem", "", base=base, scale=1, disp=displacement, size=size)
+
+
+def absolute_memory(address, size=8):
+    return Operand("mem", "", scale=1, disp=address, size=size)
 
 
 def dialogue_blocks(order, base):
@@ -200,6 +215,439 @@ def test_matching_forwarded_stack_arguments_stay_quiet():
     assert compare_instruction_pair(
         compiled, original, NoStringsImage(), NoStringsImage(), 9, 9, context
     ) == []
+
+
+def test_same_object_commutative_member_terms_stay_quiet():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"offsets"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "mov", (register("eax"), member_memory("esi", 8))),
+        instruction(0x1001, "add", (register("eax"), member_memory("esi", 0x10))),
+    ]
+    original = [
+        instruction(0x2000, "mov", (register("eax"), member_memory("esi", 0x10))),
+        instruction(0x2001, "add", (register("eax"), member_memory("esi", 8))),
+    ]
+
+    for idx in range(2):
+        assert compare_instruction_pair(
+            compiled, original, NoStringsImage(), NoStringsImage(), idx, idx, context
+        ) == []
+
+
+def test_different_object_member_terms_are_not_treated_as_commutative():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"offsets"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "mov", (register("eax"), member_memory("esi", 8))),
+        instruction(0x1001, "add", (register("eax"), member_memory("edi", 0x10))),
+    ]
+    original = [
+        instruction(0x2000, "mov", (register("eax"), member_memory("esi", 0x10))),
+        instruction(0x2001, "add", (register("eax"), member_memory("edi", 8))),
+    ]
+
+    warnings = compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context
+    )
+
+    assert [warning[:3] for warning in warnings] == [("offset", 8, 0x10)]
+
+
+def test_commutative_member_terms_do_not_cross_a_base_register_write():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"offsets"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "mov", (register("eax"), member_memory("esi", 8))),
+        instruction(0x1001, "mov", (register("esi"), register("edi"))),
+        instruction(0x1002, "add", (register("eax"), member_memory("esi", 0x10))),
+    ]
+    original = [
+        instruction(0x2000, "mov", (register("eax"), member_memory("esi", 0x10))),
+        instruction(0x2001, "mov", (register("esi"), register("edi"))),
+        instruction(0x2002, "add", (register("eax"), member_memory("esi", 8))),
+    ]
+
+    warnings = compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context
+    )
+
+    assert [warning[:3] for warning in warnings] == [("offset", 8, 0x10)]
+
+
+def test_commutative_member_expression_does_not_hide_an_intervening_access():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"offsets"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "mov", (register("eax"), member_memory("esi", 8))),
+        instruction(0x1001, "mov", (register("edx"), member_memory("edi", 0x20))),
+        instruction(0x1002, "add", (register("eax"), member_memory("esi", 0x10))),
+    ]
+    original = [
+        instruction(0x2000, "mov", (register("eax"), member_memory("esi", 0x10))),
+        instruction(0x2001, "mov", (register("edx"), member_memory("edi", 0x24))),
+        instruction(0x2002, "add", (register("eax"), member_memory("esi", 8))),
+    ]
+
+    warnings = compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 1, 1, context
+    )
+
+    assert [warning[:3] for warning in warnings] == [("offset", 0x20, 0x24)]
+
+
+def test_reversed_same_object_member_comparison_stays_quiet():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"offsets"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "mov", (register("ecx"), member_memory("esi", 8))),
+        instruction(0x1001, "cmp", (member_memory("esi", 0x10), register("ecx"))),
+        instruction(0x1002, "jge", (immediate(0x1010),)),
+    ]
+    original = [
+        instruction(0x2000, "mov", (register("ecx"), member_memory("esi", 0x10))),
+        instruction(0x2001, "cmp", (member_memory("esi", 8), register("ecx"))),
+        instruction(0x2002, "jle", (immediate(0x2010),)),
+    ]
+
+    for idx in range(2):
+        assert compare_instruction_pair(
+            compiled, original, NoStringsImage(), NoStringsImage(), idx, idx, context
+        ) == []
+
+
+def test_changed_same_object_member_relation_is_reported():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"offsets"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "mov", (register("ecx"), member_memory("esi", 8))),
+        instruction(0x1001, "cmp", (member_memory("esi", 0x10), register("ecx"))),
+        instruction(0x1002, "jg", (immediate(0x1010),)),
+    ]
+    original = [
+        instruction(0x2000, "mov", (register("ecx"), member_memory("esi", 0x10))),
+        instruction(0x2001, "cmp", (member_memory("esi", 8), register("ecx"))),
+        instruction(0x2002, "jle", (immediate(0x2010),)),
+    ]
+
+    warnings = compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context
+    )
+
+    assert [warning[:3] for warning in warnings] == [("offset", 8, 0x10)]
+
+
+def test_mask_moved_across_arithmetic_shift_stays_quiet():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "sar", (register("eax"), immediate(7))),
+        instruction(0x1001, "and", (register("eax"), immediate(-512))),
+    ]
+    original = [
+        instruction(0x2000, "and", (register("eax"), immediate(-65409))),
+        instruction(0x2001, "sar", (register("eax"), immediate(7))),
+    ]
+
+    assert compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 1, 0, context
+    ) == []
+
+
+def test_adjacent_integer_bound_spellings_stay_quiet():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "cmp", (register("eax"), immediate(10))),
+        instruction(0x1001, "jl", (immediate(0x1005),)),
+        instruction(0x1002, "ret"),
+        instruction(0x1005, "ret"),
+    ]
+    original = [
+        instruction(0x2000, "cmp", (register("eax"), immediate(9))),
+        instruction(0x2001, "jle", (immediate(0x2005),)),
+        instruction(0x2002, "ret"),
+        instruction(0x2005, "ret"),
+    ]
+
+    assert compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context
+    ) == []
+
+
+def test_complementary_adjacent_bounds_with_swapped_edges_stay_quiet():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "cmp", (register("eax"), immediate(10))),
+        instruction(0x1001, "jge", (immediate(0x1005),)),
+        instruction(0x1002, "mov", (register("eax"), immediate(1))),
+        instruction(0x1003, "ret"),
+        instruction(0x1005, "xor", (register("eax"), register("eax"))),
+        instruction(0x1006, "ret"),
+    ]
+    original = [
+        instruction(0x2000, "cmp", (register("eax"), immediate(9))),
+        instruction(0x2001, "jle", (immediate(0x2005),)),
+        instruction(0x2002, "xor", (register("eax"), register("eax"))),
+        instruction(0x2003, "ret"),
+        instruction(0x2005, "mov", (register("eax"), immediate(1))),
+        instruction(0x2006, "ret"),
+    ]
+
+    assert compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context
+    ) == []
+
+
+def test_changed_adjacent_integer_bound_is_reported():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "cmp", (register("eax"), immediate(10))),
+        instruction(0x1001, "jl", (immediate(0x1005),)),
+        instruction(0x1002, "ret"),
+        instruction(0x1005, "ret"),
+    ]
+    original = [
+        instruction(0x2000, "cmp", (register("eax"), immediate(9))),
+        instruction(0x2001, "jl", (immediate(0x2005),)),
+        instruction(0x2002, "ret"),
+        instruction(0x2005, "ret"),
+    ]
+
+    warnings = compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context
+    )
+
+    assert [warning[:3] for warning in warnings] == [("imm", 10, 9)]
+
+
+def test_mask_movement_does_not_cross_a_control_flow_edge():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "sar", (register("eax"), immediate(7))),
+        instruction(0x1001, "jmp", (immediate(0x1003),)),
+        instruction(0x1003, "and", (register("eax"), immediate(-512))),
+    ]
+    original = [
+        instruction(0x2000, "and", (register("eax"), immediate(-65409))),
+        instruction(0x2001, "jmp", (immediate(0x2003),)),
+        instruction(0x2003, "sar", (register("eax"), immediate(7))),
+    ]
+
+    warnings = compare_instruction_pair(
+        compiled, original, NoStringsImage(), NoStringsImage(), 2, 0, context
+    )
+
+    assert [warning[:3] for warning in warnings] == [("imm", -512, -65409)]
+
+
+def test_reversed_x87_operands_and_status_test_stay_quiet():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "fld", (absolute_memory(0x5000),)),
+        instruction(0x1001, "fcomp", (stack_memory(8),)),
+        instruction(0x1002, "fnstsw", (register("ax"),)),
+        instruction(0x1003, "test", (register("ah"), immediate(0x41))),
+        instruction(0x1004, "jne", (immediate(0x1010),)),
+    ]
+    original = [
+        instruction(0x2000, "fld", (stack_memory(8),)),
+        instruction(0x2001, "fcomp", (absolute_memory(0x6000),)),
+        instruction(0x2002, "fnstsw", (register("ax"),)),
+        instruction(0x2003, "test", (register("ah"), immediate(1))),
+        instruction(0x2004, "je", (immediate(0x2010),)),
+    ]
+
+    compiled_image = MemoryImage({0x5000: b"sameval!"})
+    original_image = MemoryImage({0x6000: b"sameval!"})
+
+    assert compare_instruction_pair(
+        compiled, original, compiled_image, original_image, 3, 3, context
+    ) == []
+
+
+def test_x87_status_change_without_operand_reversal_is_reported():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "fld", (stack_memory(8),)),
+        instruction(0x1001, "fcomp", (absolute_memory(0x5000),)),
+        instruction(0x1002, "fnstsw", (register("ax"),)),
+        instruction(0x1003, "test", (register("ah"), immediate(0x41))),
+        instruction(0x1004, "jne", (immediate(0x1010),)),
+    ]
+    original = [
+        instruction(0x2000, "fld", (stack_memory(8),)),
+        instruction(0x2001, "fcomp", (absolute_memory(0x6000),)),
+        instruction(0x2002, "fnstsw", (register("ax"),)),
+        instruction(0x2003, "test", (register("ah"), immediate(1))),
+        instruction(0x2004, "je", (immediate(0x2010),)),
+    ]
+
+    compiled_image = MemoryImage({0x5000: b"sameval!"})
+    original_image = MemoryImage({0x6000: b"sameval!"})
+    warnings = compare_instruction_pair(
+        compiled, original, compiled_image, original_image, 3, 3, context
+    )
+
+    assert [warning[:3] for warning in warnings] == [("imm", 0x41, 1)]
+
+
+def test_reversed_x87_complement_uses_crossed_successors():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "fld", (absolute_memory(0x5000),)),
+        instruction(0x1001, "fcomp", (stack_memory(8),)),
+        instruction(0x1002, "fnstsw", (register("ax"),)),
+        instruction(0x1003, "test", (register("ah"), immediate(0x41))),
+        instruction(0x1004, "je", (immediate(0x1010),)),
+        instruction(0x1005, "mov", (register("eax"), register("ebx"))),
+        instruction(0x1006, "add", (register("eax"), register("ecx"))),
+        instruction(0x1007, "ret"),
+        instruction(0x1010, "call", (immediate(0x1100),)),
+        instruction(0x1011, "ret"),
+    ]
+    original = [
+        instruction(0x2000, "fld", (stack_memory(8),)),
+        instruction(0x2001, "fcomp", (absolute_memory(0x6000),)),
+        instruction(0x2002, "fnstsw", (register("ax"),)),
+        instruction(0x2003, "test", (register("ah"), immediate(1))),
+        instruction(0x2004, "je", (immediate(0x2010),)),
+        instruction(0x2005, "call", (immediate(0x2100),)),
+        instruction(0x2006, "ret"),
+        instruction(0x2010, "mov", (register("eax"), register("ebx"))),
+        instruction(0x2011, "add", (register("eax"), register("ecx"))),
+        instruction(0x2012, "ret"),
+    ]
+
+    compiled_image = MemoryImage({0x5000: b"sameval!"})
+    original_image = MemoryImage({0x6000: b"sameval!"})
+
+    assert compare_instruction_pair(
+        compiled, original, compiled_image, original_image, 3, 3, context
+    ) == []
+
+
+def test_reversed_x87_comparison_with_different_constants_is_reported():
+    policy = load_policy()
+    context = CompareContext(
+        enabled_kinds=frozenset({"immediates"}),
+        policy=policy,
+        include_stack_locals=False,
+        compiled_diagnostic_targets=frozenset(),
+        original_diagnostic_targets=frozenset(),
+    )
+    compiled = [
+        instruction(0x1000, "fld", (absolute_memory(0x5000),)),
+        instruction(0x1001, "fcomp", (stack_memory(8),)),
+        instruction(0x1002, "fnstsw", (register("ax"),)),
+        instruction(0x1003, "test", (register("ah"), immediate(0x41))),
+        instruction(0x1004, "jne", (immediate(0x1010),)),
+    ]
+    original = [
+        instruction(0x2000, "fld", (stack_memory(8),)),
+        instruction(0x2001, "fcomp", (absolute_memory(0x6000),)),
+        instruction(0x2002, "fnstsw", (register("ax"),)),
+        instruction(0x2003, "test", (register("ah"), immediate(1))),
+        instruction(0x2004, "je", (immediate(0x2010),)),
+    ]
+    compiled_image = MemoryImage({0x5000: b"compiled"})
+    original_image = MemoryImage({0x6000: b"original"})
+
+    warnings = compare_instruction_pair(
+        compiled, original, compiled_image, original_image, 3, 3, context
+    )
+
+    assert [warning[:3] for warning in warnings] == [("imm", 0x41, 1)]
 
 
 def test_member_loads_consumed_by_different_calls_are_not_compared():
