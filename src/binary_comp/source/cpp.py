@@ -18,6 +18,7 @@ CALLING_CONVENTIONS = (
 )
 
 ASM_EXCLUSION_MARKER_RE = re.compile(r"/\*\s*ASM\s*\*/")
+STUB_EXCLUSION_MARKER_RE = re.compile(r"/\*\s*STUB\s*\*/")
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,7 @@ def parse_function_start_comment(text: str, line_text: str, include_no_assembly:
     if not include_no_assembly and (
         "No assembly extracted" in line_text
         or ASM_EXCLUSION_MARKER_RE.search(line_text) is not None
+        or STUB_EXCLUSION_MARKER_RE.search(line_text) is not None
     ):
         return None
     # A scalar/vector deleting destructor (sdtor) is a compiler-generated COMDAT,

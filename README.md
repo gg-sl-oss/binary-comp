@@ -218,6 +218,20 @@ source inventory, while analyzers that explicitly request every source marker
 can still discover them. The legacy `No assembly extracted` marker remains
 supported for projects where original assembly is genuinely unavailable.
 
+Use an adjacent `STUB` marker for a known, intentionally unreconstructed
+function body:
+
+```cpp
+/* Function start: 0x00402000 */ /* STUB */
+void debug_overlay(void)
+{
+    report_unimplemented();
+}
+```
+
+Like `ASM`, `STUB` omits that function from the default report and verifier
+inventories without claiming that the original assembly is unavailable.
+
 ### Global Annotations
 
 Global data analyzers need original addresses either encoded in symbol names or

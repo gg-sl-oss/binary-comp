@@ -59,7 +59,7 @@ def test_source_function_groups_from_cpp_fixture(fixture_root):
     assert groups[0].addresses == ("00401000",)
 
 
-def test_source_function_groups_exclude_asm_markers(tmp_path):
+def test_source_function_groups_exclude_asm_and_stub_markers(tmp_path):
     source = tmp_path / "asm.cpp"
     source.write_text(
         """
@@ -69,6 +69,8 @@ void asm_function() {}
 void unavailable_function() {}
 /* Function start: 0x00403000 */
 void c_function() {}
+/* Function start: 0x00404000 */ /* STUB */
+void stub_function() {}
 """,
         encoding="utf-8",
     )
@@ -85,6 +87,7 @@ void c_function() {}
         ("asm_function", ("00401000",)),
         ("unavailable_function", ("00402000",)),
         ("c_function", ("00403000",)),
+        ("stub_function", ("00404000",)),
     ]
 
 
