@@ -213,7 +213,13 @@ def referenced_register(operand: str) -> str | None:
     operand = operand.strip().lower()
     if ":" in operand:
         operand = operand.rsplit(":", 1)[1]
-    return plain_register(operand)
+    register = plain_register(operand)
+    if register is not None:
+        return register
+    contents = bracket_contents(operand)
+    if len(contents) != 1:
+        return None
+    return plain_register(contents[0].strip())
 
 
 def bracket_contents(operand: str) -> list[str]:
@@ -368,7 +374,7 @@ def extract_original_global_accesses(
                 symbol = symbol_for_address(register_bases[register], global_ranges, data_ranges)
                 if symbol is not None:
                     accesses.append(access_token(string_instruction_kind(mnemonic, index), symbol))
-        if mnemonic != "lea":
+        if not string_operands and mnemonic != "lea":
             for index, operand in enumerate(operands):
                 for address in addresses_from_memory_operand(operand, register_bases):
                     memory_addresses.add(address)
@@ -601,25 +607,26 @@ def extract_compiled_global_accesses(
                     continue
                 symbol = canonical_compiled_symbol(register_bases[register], global_ranges)
                 accesses.append(access_token(string_instruction_kind(mnemonic, index), symbol))
-        if mnemonic != "lea":
+        if not string_operands and mnemonic != "lea":
             for index, operand in enumerate(operands):
                 for symbol in symbols_from_register_memory_operand(operand, register_bases):
                     symbol = canonical_compiled_symbol(symbol, global_ranges)
                     for kind in access_kinds_for_operand(mnemonic, index):
                         accesses.append(access_token(kind, symbol))
-        for index, operand in enumerate(operands):
-            for symbol, is_address in extract_symbols_from_operand(operand, global_names):
-                symbol = canonical_compiled_symbol(symbol, global_ranges)
-                if mnemonic == "lea" and index == 1:
-                    if include_address_immediates:
-                        accesses.append(access_token("ADDR", symbol))
-                    continue
-                if is_address:
-                    if include_address_immediates:
-                        accesses.append(access_token("ADDR", symbol))
-                    continue
-                for kind in access_kinds_for_operand(mnemonic, index):
-                    accesses.append(access_token(kind, symbol))
+        if not string_operands:
+            for index, operand in enumerate(operands):
+                for symbol, is_address in extract_symbols_from_operand(operand, global_names):
+                    symbol = canonical_compiled_symbol(symbol, global_ranges)
+                    if mnemonic == "lea" and index == 1:
+                        if include_address_immediates:
+                            accesses.append(access_token("ADDR", symbol))
+                        continue
+                    if is_address:
+                        if include_address_immediates:
+                            accesses.append(access_token("ADDR", symbol))
+                        continue
+                    for kind in access_kinds_for_operand(mnemonic, index):
+                        accesses.append(access_token(kind, symbol))
         update_compiled_register_bases(mnemonic, operands, global_names, register_bases)
     return accesses
 

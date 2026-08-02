@@ -24,6 +24,7 @@ MOV dword ptr [ECX + 0x4],EAX
 MOV EDI,0x00402020
 MOV ESI,0x00402010
 MOVSD.REP ES:EDI,ESI
+REP MOVSD DWORD PTR ES:[EDI], DWORD PTR [ESI]
 PUSH 0x00402010
 """,
         encoding="utf-8",
@@ -44,6 +45,8 @@ PUSH 0x00402010
         "WRITE:g_Array_00402020+0x4",
         "WRITE:g_Array_00402020",
         "READ:g_Source_00402010",
+        "WRITE:g_Array_00402020",
+        "READ:g_Source_00402010",
     ]
     assert extract_original_global_accesses(
         str(disasm),
@@ -61,6 +64,8 @@ PUSH 0x00402010
         "WRITE:g_Array_00402020+0x4",
         "ADDR:g_Array_00402020",
         "ADDR:g_Source_00402010",
+        "WRITE:g_Array_00402020",
+        "READ:g_Source_00402010",
         "WRITE:g_Array_00402020",
         "READ:g_Source_00402010",
         "ADDR:g_Source_00402010",
