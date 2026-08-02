@@ -446,6 +446,8 @@ def test_stack_indirect_calls_are_not_vtable_calls(tmp_path):
 
     assert parse_indirect_call("CALL dword ptr [ESP + 0x28]", policy) == "__indirect__"
     assert parse_indirect_call("CALL dword ptr [EAX + 0x28]", policy) == "indirect[0x28]"
+    assert parse_indirect_call("CALL dword ptr [EAX + ECX*4 + 0x28]", policy) == "__indirect__"
+    assert parse_indirect_call("JMP dword ptr [EAX + ECX*4 + 0x28]", policy) is None
 
     asm_path = tmp_path / "stack-callback.asm"
     asm_path.write_text(
@@ -453,6 +455,22 @@ def test_stack_indirect_calls_are_not_vtable_calls(tmp_path):
 _TEXT SEGMENT
 ?Run@@YAXXZ PROC NEAR ; Run, COMDAT
     call DWORD PTR _cmpFunc$[esp+20]
+?Run@@YAXXZ ENDP
+_TEXT ENDS
+""",
+        encoding="utf-8",
+    )
+
+    assert extract_calls_from_compiled(str(asm_path), "Run") == ["__indirect__"]
+
+
+def test_indexed_indirect_calls_ignore_register_allocation(tmp_path):
+    asm_path = tmp_path / "indexed-callback.asm"
+    asm_path.write_text(
+        """
+_TEXT SEGMENT
+?Run@@YAXXZ PROC NEAR ; Run, COMDAT
+    call DWORD PTR [ebx+eax*4+72]
 ?Run@@YAXXZ ENDP
 _TEXT ENDS
 """,

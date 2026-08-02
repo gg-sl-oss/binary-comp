@@ -721,6 +721,13 @@ def parse_indirect_call(line: str, policy: CallsPolicy) -> str | None:
         offset = int(match.group(2), 16) if match.group(2) else 0
         return f"indirect[0x{offset:x}]"
 
+    match = re.match(r"CALL\s+dword\s+ptr\s*(\[[^\]]+\])", line, re.IGNORECASE)
+    if match and "*" in match.group(1):
+        # Indexed function tables depend on register allocation and cannot be
+        # compared meaningfully as textual operands.  Keep base+constant vtable
+        # calls precise, but use the shared generic token for scaled indexing.
+        return "__indirect__"
+
     match = re.match(r"(?:call|jmp)\s+DWORD\s+PTR\s*\[\s*(\w+)\s*(?:\+\s*(\d+))?\s*\]", line, re.IGNORECASE)
     if match:
         base = match.group(1).upper()
@@ -1010,6 +1017,9 @@ def extract_calls_from_compiled(
                 continue
             pointer_expr = match.group(1).split(";", 1)[0].strip()
             if re.search(r"\[\s*(?:e[bs]p)\s*(?:[+\-]\s*\d+)?\s*\]", pointer_expr, re.IGNORECASE):
+                calls.append("__indirect__")
+                continue
+            if "*" in pointer_expr and "[" in pointer_expr:
                 calls.append("__indirect__")
                 continue
             calls.append(f"DWORD PTR {pointer_expr}" if "$[" in pointer_expr else pointer_expr)
