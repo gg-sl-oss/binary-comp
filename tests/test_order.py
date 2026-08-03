@@ -4,7 +4,12 @@ import struct
 
 import pytest
 
-from binary_comp.analyzers.order import OrderOptions, format_order_report, generate_order_report
+from binary_comp.analyzers.order import (
+    OrderOptions,
+    format_order_report,
+    generate_order_report,
+    inverted_source_files,
+)
 from binary_comp.cli import build_parser, run_order
 from binary_comp.config import BuildConfig, ProjectTarget
 
@@ -39,6 +44,7 @@ def test_order_command_parser_exposes_analysis_controls():
         "0",
         "--show-runs",
         "--show-all",
+        "--fail-on-inversions",
     ])
 
     assert args.handler is run_order
@@ -48,6 +54,7 @@ def test_order_command_parser_exposes_analysis_controls():
     assert args.limit == 0
     assert args.show_runs is True
     assert args.show_all is True
+    assert args.fail_on_inversions is True
 
 
 def test_order_report_inventories_fixture_and_formats_hints(fixture_root, sample_binaries):
@@ -138,6 +145,53 @@ def test_order_report_detects_source_fragmentation_and_inversions(sample_binarie
     assert "1 source-order inversion(s)" in text
     assert "source:  0x00401030 -> 0x00401000" in text
     assert "address: 0x00401000 -> 0x00401030" in text
+
+
+def test_inverted_source_files_gates_on_definition_order(sample_binaries, tmp_path):
+    require_cpp_parser()
+    original, rebuilt = sample_binaries
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "ascending.cpp").write_text(
+        "/* Function start: 0x00401000 */\n"
+        "int s_early() { return 0; }\n"
+        "/* Function start: 0x00401020 */\n"
+        "int s_late() { return 2; }\n"
+    )
+    (src_dir / "jumbled.cpp").write_text(
+        "/* Function start: 0x00401030 */\n"
+        "int u_late() { return 3; }\n"
+        "/* Function start: 0x00401010 */\n"
+        "int u_early() { return 1; }\n"
+    )
+    target = ProjectTarget(
+        name="full",
+        original_exe=str(original),
+        rebuilt_exe=str(rebuilt),
+        map_path="",
+        source_dirs=(str(src_dir),),
+        build=BuildConfig(),
+    )
+
+    report = generate_order_report(
+        target,
+        OrderOptions(build=False, include_similarity=False, fail_on_inversions=True),
+    )
+
+    assert [summary.source_file for summary in inverted_source_files(report)] == ["jumbled.cpp"]
+    # The detail block is printed without --show-all so the gate names the offenders.
+    assert "source:  0x00401030 -> 0x00401010" in format_order_report(report)
+
+    filtered = generate_order_report(
+        target,
+        OrderOptions(
+            build=False,
+            include_similarity=False,
+            fail_on_inversions=True,
+            file_filter="ascending.cpp",
+        ),
+    )
+    assert inverted_source_files(filtered) == ()
 
 
 def test_order_report_finds_initializer_like_pointer_anchor(fixture_root, tmp_path):

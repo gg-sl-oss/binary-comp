@@ -40,6 +40,7 @@ class OrderOptions:
     file_filter: str | None = None
     show_runs: bool = False
     show_all: bool = False
+    fail_on_inversions: bool = False
     canonical_aliases: dict[str, str] | None = None
     signature_overloads: frozenset[str] = frozenset()
 
@@ -662,6 +663,21 @@ def _address_sequence(definitions: list[SourceDefinition] | tuple[SourceDefiniti
     return " -> ".join(addresses)
 
 
+def inverted_source_files(report: OrderReport) -> tuple[SourceOrderSummary, ...]:
+    """Source files whose definition order disagrees with original address order.
+
+    Projects that keep definitions sorted by original address can treat a
+    non-empty result as a failure: the compiler emits in source order, so an
+    inversion guarantees a layout the original cannot have had.
+    """
+    options = report.options
+    return tuple(
+        summary
+        for summary in report.source_summaries
+        if summary.inversion_count and _summary_matches(summary, options.file_filter)
+    )
+
+
 def format_order_report(report: OrderReport) -> str:
     options = report.options
     lines = [
@@ -740,7 +756,9 @@ def format_order_report(report: OrderReport) -> str:
             f"{summary.inversion_count} source-order inversion(s), "
             f"0x{summary.min_address:08X}-0x{summary.max_address:08X}{rebuilt}"
         )
-        if summary.inversion_count and (options.file_filter or options.show_all):
+        if summary.inversion_count and (
+            options.file_filter or options.show_all or options.fail_on_inversions
+        ):
             source_order = _address_sequence(summary.definitions)
             address_order = _address_sequence(sorted(summary.definitions, key=lambda item: item.address))
             lines.append(f"    source:  {source_order}")

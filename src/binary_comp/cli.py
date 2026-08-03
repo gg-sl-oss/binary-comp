@@ -51,6 +51,7 @@ from binary_comp.analyzers.omf import (
     generate_omf_similarity_report,
 )
 from binary_comp.analyzers.order import (
+    inverted_source_files,
     OrderOptions,
     format_order_report,
     generate_order_report,
@@ -487,6 +488,9 @@ def add_order_parser(subparsers) -> None:
                         help="List contiguous original-address runs for mapped source files")
     parser.add_argument("--show-all", action="store_true",
                         help="Include uncertain gaps and source files without detected ordering problems")
+    parser.add_argument("--fail-on-inversions", action="store_true",
+                        help="Exit non-zero if any source file's definition order disagrees with "
+                             "original address order (for projects that keep definitions sorted by address)")
     parser.set_defaults(handler=run_order)
 
 
@@ -1079,6 +1083,7 @@ def run_order(args) -> int:
                 file_filter=args.file_filter,
                 show_runs=args.show_runs,
                 show_all=args.show_all,
+                fail_on_inversions=args.fail_on_inversions,
                 canonical_aliases=extract_canonical_aliases(config),
                 signature_overloads=extract_signature_overloads(config),
             ),
@@ -1088,6 +1093,17 @@ def run_order(args) -> int:
         return 2
 
     print(format_order_report(report))
+
+    if args.fail_on_inversions:
+        inverted = inverted_source_files(report)
+        if inverted:
+            total = sum(summary.inversion_count for summary in inverted)
+            print(
+                f"\nerror: {total} source-order inversion(s) across {len(inverted)} file(s); "
+                "definitions are not sorted by original address",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 
