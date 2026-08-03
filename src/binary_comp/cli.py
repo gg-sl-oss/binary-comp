@@ -50,6 +50,11 @@ from binary_comp.analyzers.omf import (
     format_omf_comparison,
     generate_omf_similarity_report,
 )
+from binary_comp.analyzers.triage import (
+    TriageOptions,
+    format_triage_report,
+    generate_triage_report,
+)
 from binary_comp.analyzers.order import (
     inverted_source_files,
     OrderOptions,
@@ -492,6 +497,34 @@ def add_order_parser(subparsers) -> None:
                         help="Exit non-zero if any source file's definition order disagrees with "
                              "original address order (for projects that keep definitions sorted by address)")
     parser.set_defaults(handler=run_order)
+
+
+def add_triage_parser(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "triage",
+        help="Split near-miss functions into source-reachable and allocator churn",
+    )
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
+    parser.add_argument("--target", default="full", help="Target name from config (default: full)")
+    parser.add_argument("--no-build", action="store_true", help="Use the existing rebuilt binary and map")
+    parser.add_argument("--filter", dest="file_filter", help="Only include matching source files or function names")
+    parser.add_argument("--max-similarity", type=float, default=99.999,
+                        help="Skip functions at or above this score (default: 99.999, i.e. exclude exact matches)")
+    parser.add_argument("--min-similarity", type=float, default=0.0,
+                        help="Skip functions below this score (default: 0)")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Maximum functions to list; 0 prints all (default: 0)")
+    parser.add_argument("--show-diffs", type=int, default=0, metavar="N",
+                        help="Print the first N differing instruction pairs per structural function")
+    parser.add_argument("--largest-first", action="store_true",
+                        help="List the biggest structural gaps first (default: smallest, "
+                             "which are the cheapest to fix)")
+    parser.add_argument("--image-base", type=lambda value: int(value, 0), default=0x00400000,
+                        help="Start of the loaded image; addresses inside it are treated as "
+                             "relocations, not constants (default: 0x400000)")
+    parser.add_argument("--image-end", type=lambda value: int(value, 0), default=0x00800000,
+                        help="End of the loaded image (default: 0x800000)")
+    parser.set_defaults(handler=run_triage)
 
 
 def add_globals_parser(subparsers) -> None:
@@ -1070,6 +1103,32 @@ def run_report(args) -> int:
     return 0
 
 
+def run_triage(args) -> int:
+    try:
+        config, target = load_project_target(args.config, args.target)
+        report = generate_triage_report(
+            target,
+            TriageOptions(
+                build=not args.no_build,
+                file_filter=args.file_filter,
+                max_similarity=args.max_similarity,
+                min_similarity=args.min_similarity,
+                limit=args.limit,
+                show_diffs=args.show_diffs,
+                largest_first=args.largest_first,
+                image_range=(args.image_base, args.image_end),
+                canonical_aliases=extract_canonical_aliases(config),
+                signature_overloads=extract_signature_overloads(config),
+            ),
+        )
+    except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    print(format_triage_report(report))
+    return 0
+
+
 def run_order(args) -> int:
     try:
         config, target = load_project_target(args.config, args.target)
@@ -1169,6 +1228,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_mz_info_parser(subparsers)
     add_omf_compare_parser(subparsers)
     add_order_parser(subparsers)
+    add_triage_parser(subparsers)
     add_tpov_info_parser(subparsers)
     add_tpu_compare_parser(subparsers)
     add_tpu_info_parser(subparsers)
