@@ -15,7 +15,8 @@ placeholder -- then aligns them with difflib so an inserted or deleted
 instruction does not misreport everything after it as a substitution. What
 survives normalisation is classified, and each function gets a verdict:
 
-  churn      every difference is register / slot / relocation / canonicalised
+  churn      every difference is register / slot / relocation / canonicalised /
+             a pure reordering of the same instructions
   structural at least one mnemonic, immediate or instruction-count difference
 
 Ranking the structural list by how many instructions are actually in question
@@ -125,6 +126,7 @@ class TriageRow:
     slot: int                 # differ only in stack displacement
     relocation: int           # differ only in an in-image address
     canonical: int            # mirrored cmp/Jcc the compiler chose, not the source
+    scheduling: int           # same instructions, emitted in a different order
     mnemonic: int             # different instruction
     immediate: int            # same instruction, different constant
     extra: int                # instructions we emit that the original lacks
@@ -137,7 +139,8 @@ class TriageRow:
 
     @property
     def churn(self) -> int:
-        return self.register + self.slot + self.relocation + self.canonical
+        return (self.register + self.slot + self.relocation + self.canonical
+                + self.scheduling)
 
     @property
     def verdict(self) -> str:
@@ -240,6 +243,46 @@ def _text(instruction: Instruction) -> str:
     return f"{instruction.mnemonic} {instruction.op_str}".strip()
 
 
+def _merge_transpositions(opcodes, ours_norm, orig_norm, counts):
+    """Fold a delete/insert pair holding the same instructions into `scheduling`.
+
+    The compiler is free to order independent instructions however it likes, and
+    when it picks a different order the aligner sees a block we have that the
+    original lacks and vice versa.  Those are not missing or invented code, so
+    counting them as structural sends you hunting for a defect that is not there.
+
+    The two blocks arrive in either order depending on which side the aligner
+    anchored, so both directions are paired.  Only a short way ahead is
+    searched: a reordering keeps the instructions close together.
+    """
+    opcodes = list(opcodes)
+    consumed: set[int] = set()
+
+    def block(index):
+        tag, i1, i2, j1, j2 = opcodes[index]
+        if tag == "delete":
+            return sorted(ours_norm[i1:i2])
+        if tag == "insert":
+            return sorted(orig_norm[j1:j2])
+        return None
+
+    for a in range(len(opcodes)):
+        if a in consumed or opcodes[a][0] not in ("delete", "insert"):
+            continue
+        want = "insert" if opcodes[a][0] == "delete" else "delete"
+        mine = block(a)
+        if not mine:
+            continue
+        for b in range(a + 1, min(a + 4, len(opcodes))):
+            if b in consumed or opcodes[b][0] != want:
+                continue
+            if block(b) == mine:
+                counts["scheduling"] += len(mine)
+                consumed.update({a, b})
+                break
+    return [op for k, op in enumerate(opcodes) if k not in consumed]
+
+
 def triage_comparison(
     function_name: str,
     source_file: str,
@@ -255,11 +298,12 @@ def triage_comparison(
     orig_norm = [normalise(t, options.image_range) for t in orig_text]
 
     counts = dict(matched=0, register=0, slot=0, relocation=0, canonical=0,
-                  mnemonic=0, immediate=0, extra=0, missing=0)
+                  scheduling=0, mnemonic=0, immediate=0, extra=0, missing=0)
     diffs: list[TriageDiff] = []
 
     matcher = difflib.SequenceMatcher(None, ours_norm, orig_norm, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+    opcodes = _merge_transpositions(matcher.get_opcodes(), ours_norm, orig_norm, counts)
+    for tag, i1, i2, j1, j2 in opcodes:
         if tag == "equal":
             for k in range(i2 - i1):
                 a, b = ours_text[i1 + k], orig_text[j1 + k]
@@ -412,13 +456,14 @@ def format_triage_report(report: TriageReport) -> str:
         lines += [
             "",
             "Churn only — no source edit reaches these",
-            f"  {'function':<40}{'addr':>9}{'sim':>8}{'reg':>5}{'slot':>6}{'reloc':>7}{'canon':>7}  file",
+            f"  {'function':<40}{'addr':>9}{'sim':>8}{'reg':>5}{'slot':>6}"
+            f"{'reloc':>7}{'canon':>7}{'sched':>7}  file",
         ]
         for row in churn:
             lines.append(
                 f"  {row.function_name:<40}{row.original_addr:>9X}{row.similarity:>8.2f}"
-                f"{row.register:>5}{row.slot:>6}{row.relocation:>7}{row.canonical:>7}"
-                f"  {row.source_file}"
+                f"{row.register:>5}{row.slot:>6}{row.relocation:>7}"
+                f"{row.canonical:>7}{row.scheduling:>7}  {row.source_file}"
             )
 
     return "\n".join(lines)

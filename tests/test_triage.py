@@ -136,3 +136,23 @@ def test_mirrored_jcc_without_a_swapped_compare_stays_structural():
     assert row.canonical == 0
     assert row.mnemonic == 1
     assert row.verdict == "structural"
+
+
+def test_reordered_instructions_are_scheduling_not_missing_code():
+    # The compiler may emit independent instructions in either order; that is not
+    # a source defect, so it must not show up as extra/missing.
+    row = row_for(
+        ["push 1", "add edi, 0x1f", "mov eax, ebx", "ret"],
+        ["push 1", "mov eax, ebx", "add edi, 0x1f", "ret"],
+    )
+    assert row.scheduling == 1
+    assert row.extra == 0
+    assert row.missing == 0
+    assert row.verdict == "churn"
+
+
+def test_genuinely_missing_code_is_still_reported():
+    row = row_for(["push 1", "ret"], ["push 1", "call 0x402000", "ret"])
+    assert row.scheduling == 0
+    assert row.missing == 1
+    assert row.verdict == "structural"
