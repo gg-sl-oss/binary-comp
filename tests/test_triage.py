@@ -114,3 +114,25 @@ def test_triage_command_parser_exposes_controls():
     assert args.largest_first is True
     assert args.image_base == 0x400000
     assert args.image_end == 0x800000
+
+
+def test_mirrored_comparison_is_canonicalisation_not_a_real_branch_difference():
+    # MSVC decides which operand goes in the register, so `count > index` and
+    # `index < count` can produce mirrored cmp/Jcc pairs no source spelling picks.
+    row = row_for(
+        ["mov eax, dword ptr [ebp - 4]", "cmp dword ptr [ebp - 0x14], eax", "jge 0x401100"],
+        ["mov eax, dword ptr [ebp - 0x14]", "cmp dword ptr [ebp - 4], eax", "jle 0x402100"],
+    )
+    assert row.canonical == 1
+    assert row.mnemonic == 0
+    assert row.verdict == "churn"
+
+
+def test_mirrored_jcc_without_a_swapped_compare_stays_structural():
+    row = row_for(
+        ["cmp eax, ebx", "jge 0x401100"],
+        ["cmp eax, ebx", "jle 0x402100"],
+    )
+    assert row.canonical == 0
+    assert row.mnemonic == 1
+    assert row.verdict == "structural"

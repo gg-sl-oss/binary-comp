@@ -15,7 +15,7 @@ placeholder -- then aligns them with difflib so an inserted or deleted
 instruction does not misreport everything after it as a substitution. What
 survives normalisation is classified, and each function gets a verdict:
 
-  churn      every difference is register / slot / relocation
+  churn      every difference is register / slot / relocation / canonicalised
   structural at least one mnemonic, immediate or instruction-count difference
 
 Ranking the structural list by how many instructions are actually in question
@@ -57,6 +57,39 @@ _HEX_RE = re.compile(r"0x[0-9a-f]+")
 # the source.  Immediates outside that window are real constants and stay.
 DEFAULT_IMAGE_RANGE = (0x00400000, 0x00800000)
 
+# MSVC canonicalises integer comparisons: it decides which operand goes in the
+# register, so `a > b` and `b < a` can compile to mirrored cmp/Jcc pairs that no
+# source spelling chooses between.  Recognising the pair keeps it out of the
+# structural list, where it is a false positive.
+_JCC_ALIASES = {
+    "jnl": "jge", "jng": "jle", "jnle": "jg", "jnge": "jl",
+    "jnb": "jae", "jnbe": "ja", "jna": "jbe", "jnae": "jb",
+    "jnz": "jne", "jz": "je", "jnc": "jae", "jc": "jb",
+}
+_MIRRORED_JCC = frozenset({
+    frozenset({"jl", "jg"}), frozenset({"jle", "jge"}),
+    frozenset({"jb", "ja"}), frozenset({"jbe", "jae"}),
+})
+
+
+def _canonical_jcc(mnemonic: str) -> str:
+    return _JCC_ALIASES.get(mnemonic, mnemonic)
+
+
+def _swapped_compare(ours: str, orig: str, image_range: tuple[int, int]) -> bool:
+    """True when two `cmp`s compare the same things with the roles exchanged.
+
+    The exchange is rarely visible in the cmp alone: MSVC loads one operand into
+    a register first, so `cmp [a], reg(b)` and `cmp [b], reg(a)` differ only in
+    which slot is named -- a churn-level difference in isolation.  Paired with a
+    mirrored Jcc that is the canonicalisation, not a source choice.
+    """
+    if _mnemonic_of(ours) != "cmp" or _mnemonic_of(orig) != "cmp":
+        return False
+    if ours == orig:
+        return False
+    return normalise(ours, image_range) == normalise(orig, image_range)
+
 
 @dataclass(frozen=True)
 class TriageOptions:
@@ -91,6 +124,7 @@ class TriageRow:
     register: int             # differ only in register choice
     slot: int                 # differ only in stack displacement
     relocation: int           # differ only in an in-image address
+    canonical: int            # mirrored cmp/Jcc the compiler chose, not the source
     mnemonic: int             # different instruction
     immediate: int            # same instruction, different constant
     extra: int                # instructions we emit that the original lacks
@@ -103,7 +137,7 @@ class TriageRow:
 
     @property
     def churn(self) -> int:
-        return self.register + self.slot + self.relocation
+        return self.register + self.slot + self.relocation + self.canonical
 
     @property
     def verdict(self) -> str:
@@ -175,6 +209,19 @@ def _mnemonic_of(text: str) -> str:
     return parts[0] if parts else ""
 
 
+def _is_canonicalised_branch(
+    ours: str,
+    orig: str,
+    prev: tuple[str, str] | None,
+    image_range: tuple[int, int],
+) -> bool:
+    """A mirrored Jcc whose cmp compares the same things with roles exchanged."""
+    pair = frozenset({_canonical_jcc(_mnemonic_of(ours)), _canonical_jcc(_mnemonic_of(orig))})
+    if pair not in _MIRRORED_JCC:
+        return False
+    return prev is not None and _swapped_compare(prev[0], prev[1], image_range)
+
+
 def _replace_kind(ours: str, orig: str, image_range: tuple[int, int]) -> str:
     """Classify a substitution the aligner produced.
 
@@ -207,7 +254,7 @@ def triage_comparison(
     ours_norm = [normalise(t, options.image_range) for t in ours_text]
     orig_norm = [normalise(t, options.image_range) for t in orig_text]
 
-    counts = dict(matched=0, register=0, slot=0, relocation=0,
+    counts = dict(matched=0, register=0, slot=0, relocation=0, canonical=0,
                   mnemonic=0, immediate=0, extra=0, missing=0)
     diffs: list[TriageDiff] = []
 
@@ -218,6 +265,10 @@ def triage_comparison(
                 a, b = ours_text[i1 + k], orig_text[j1 + k]
                 if a == b:
                     counts["matched"] += 1
+                    continue
+                prev = (ours_text[i1 + k - 1], orig_text[j1 + k - 1]) if (i1 + k) and (j1 + k) else None
+                if _is_canonicalised_branch(a, b, prev, options.image_range):
+                    counts["canonical"] += 1
                 else:
                     counts[_classify(a, b, options.image_range)] += 1
             continue
@@ -233,6 +284,10 @@ def triage_comparison(
         span = min(i2 - i1, j2 - j1)
         for k in range(span):
             a, b = ours_text[i1 + k], orig_text[j1 + k]
+            prev = (ours_text[i1 + k - 1], orig_text[j1 + k - 1]) if (i1 + k) and (j1 + k) else None
+            if _is_canonicalised_branch(a, b, prev, options.image_range):
+                counts["canonical"] += 1
+                continue
             kind = _replace_kind(a, b, options.image_range)
             counts[kind] += 1
             if kind in ("mnemonic", "immediate"):
@@ -357,12 +412,13 @@ def format_triage_report(report: TriageReport) -> str:
         lines += [
             "",
             "Churn only — no source edit reaches these",
-            f"  {'function':<40}{'addr':>9}{'sim':>8}{'reg':>5}{'slot':>6}{'reloc':>7}  file",
+            f"  {'function':<40}{'addr':>9}{'sim':>8}{'reg':>5}{'slot':>6}{'reloc':>7}{'canon':>7}  file",
         ]
         for row in churn:
             lines.append(
                 f"  {row.function_name:<40}{row.original_addr:>9X}{row.similarity:>8.2f}"
-                f"{row.register:>5}{row.slot:>6}{row.relocation:>7}  {row.source_file}"
+                f"{row.register:>5}{row.slot:>6}{row.relocation:>7}{row.canonical:>7}"
+                f"  {row.source_file}"
             )
 
     return "\n".join(lines)
