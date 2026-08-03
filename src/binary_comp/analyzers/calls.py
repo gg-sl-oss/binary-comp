@@ -1062,7 +1062,12 @@ def has_disassembly_body(disasm_path: str) -> bool:
         return False
     if any(line.upper().startswith("RET") for line in body_lines):
         return True
-    return body_lines[-1].upper().startswith("JMP")
+    # A chunk that ends in a tail JMP has a body, and so does one that ends in a
+    # CALL the callee never returns from: the compiler emits the epilogue as
+    # unreachable and the exporter files it as a separate function.  Requiring a
+    # RET dropped the *first* chunk of exactly those pairs, so the call multiset
+    # was taken from the epilogue alone and every real call looked invented.
+    return body_lines[-1].upper().startswith(("JMP", "CALL"))
 
 
 def find_disasm_path(code_dir: str, addr: int) -> str | None:

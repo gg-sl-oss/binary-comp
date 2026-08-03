@@ -946,3 +946,19 @@ def test_value_immediates_compare_effective_stack_pointer_alias():
     )
     assert len(warnings) == 1
     assert warnings[0][0] == "imm"
+
+
+def test_chunk_ending_in_a_noreturn_call_counts_as_a_body(tmp_path):
+    # The first chunk of a split-epilogue pair ends in a call the callee never
+    # returns from; requiring a RET would drop it and lose its calls.
+    from binary_comp.analyzers.calls import has_disassembly_body
+    path = tmp_path / "FUN_0047CCD0.disassembled.txt"
+    path.write_text(
+        "Function: ls_exit\nAddress: 0x0047CCD0\n\n"
+        "PUSH esi\nMOV si, cx\nCALL 0x487b30\nMOV ecx, esi\nCALL 0x487f40\n"
+    )
+    assert has_disassembly_body(str(path)) is True
+
+    empty = tmp_path / "FUN_00400000.disassembled.txt"
+    empty.write_text("Function: nothing\nAddress: 0x00400000\n\n")
+    assert has_disassembly_body(str(empty)) is False
