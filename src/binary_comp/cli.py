@@ -50,6 +50,11 @@ from binary_comp.analyzers.omf import (
     format_omf_comparison,
     generate_omf_similarity_report,
 )
+from binary_comp.analyzers.order import (
+    OrderOptions,
+    format_order_report,
+    generate_order_report,
+)
 from binary_comp.analyzers.tpu import (
     TpuCompareError,
     compare_tpu_config_function,
@@ -448,6 +453,41 @@ def add_report_parser(subparsers) -> None:
     parser.add_argument("--filter", dest="file_filter", help="Only include matching source files or function names")
     parser.add_argument("--no-build", action="store_true", help="Use existing rebuilt binary and map")
     parser.set_defaults(handler=run_report)
+
+
+def add_order_parser(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "order",
+        help="Infer compilation-unit order and function-boundary candidates",
+    )
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH,
+                        help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
+    parser.add_argument("--target", default="full", help="Target name from config (default: full)")
+    parser.add_argument("--filter", dest="file_filter",
+                        help="Only include matching source files, functions, or addresses")
+    parser.add_argument("--no-build", action="store_true", help="Use the existing rebuilt binary and map")
+    parser.add_argument(
+        "--no-similarity",
+        action="store_true",
+        help="Skip rebuilt-function similarity scoring (faster; original-layout hints remain)",
+    )
+    parser.add_argument(
+        "--alignment",
+        type=lambda value: int(value, 0),
+        default=16,
+        help="Expected function alignment, as a power of two (default: 16)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=30,
+        help="Maximum rows per report section; 0 prints all (default: 30)",
+    )
+    parser.add_argument("--show-runs", action="store_true",
+                        help="List contiguous original-address runs for mapped source files")
+    parser.add_argument("--show-all", action="store_true",
+                        help="Include uncertain gaps and source files without detected ordering problems")
+    parser.set_defaults(handler=run_order)
 
 
 def add_globals_parser(subparsers) -> None:
@@ -1026,6 +1066,31 @@ def run_report(args) -> int:
     return 0
 
 
+def run_order(args) -> int:
+    try:
+        config, target = load_project_target(args.config, args.target)
+        report = generate_order_report(
+            target,
+            OrderOptions(
+                build=not args.no_build,
+                include_similarity=not args.no_similarity,
+                alignment=args.alignment,
+                limit=args.limit,
+                file_filter=args.file_filter,
+                show_runs=args.show_runs,
+                show_all=args.show_all,
+                canonical_aliases=extract_canonical_aliases(config),
+                signature_overloads=extract_signature_overloads(config),
+            ),
+        )
+    except (ConfigError, FileNotFoundError, RuntimeError, ValueError, FunctionCompareError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(format_order_report(report))
+    return 0
+
+
 def run_globals(args) -> int:
     try:
         config, target = load_project_target(args.config, args.target)
@@ -1087,6 +1152,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_mz_compare_parser(subparsers)
     add_mz_info_parser(subparsers)
     add_omf_compare_parser(subparsers)
+    add_order_parser(subparsers)
     add_tpov_info_parser(subparsers)
     add_tpu_compare_parser(subparsers)
     add_tpu_info_parser(subparsers)

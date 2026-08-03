@@ -254,6 +254,7 @@ bytes.
 | `export-asm` | `original_exe`, `code_export_dir` | Generates Ghidra-style `FUN_*.disassembled.txt` exports with Capstone. Source annotations and an original map are optional boundary inputs; existing Ghidra exports remain compatible. |
 | `compare` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | Also takes one Ghidra-style `FUN_*.disassembled.txt` path. |
 | `report` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs`, `code_export_dir` | Uses one export per annotated original address. Generate them with `export-asm` or Ghidra. |
+| `order` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | Ranks compilation-unit order and boundary hints. `code_export_dir` adds call, data-reference, helper-size, and frame-mode evidence. |
 | `values` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | `code_export_dir` improves original function boundaries. Capstone is required. |
 | `data` | `original_exe`, `rebuilt_exe`, `map`, `globals_source` | Compares globals with encoded or commented original addresses. |
 | `globals` | `original_exe`, `globals_source` | Optional headers and `auto_complete` broaden coverage. |
@@ -274,6 +275,7 @@ binary-comp globals --config path/to/binary-comp.json --target full --fail-on-is
 binary-comp calls --config path/to/binary-comp.json --target full --fail-on-mismatches
 binary-comp global-access --config path/to/binary-comp.json --target full --include-address-immediates
 binary-comp report --config path/to/binary-comp.json --target full
+binary-comp order --config path/to/binary-comp.json --target full --no-build
 binary-comp vtables --config path/to/binary-comp.json --target full --dump
 binary-comp seh --config path/to/binary-comp.json --target full --report
 binary-comp byte-compare ORIGINAL.OVR REBUILT.OVR
@@ -292,6 +294,37 @@ binary-comp tpu-compare --original PROG.OVR --tpu UNIT.TPU --block 3 --locate
 
 Most analyzers that read rebuilt code will run the configured build command
 first unless `--no-build` is supplied.
+
+### Compilation-unit order and boundary hints
+
+`binary-comp order` builds an original-address inventory from source annotations,
+function-map directories, and disassembly exports. It correlates that inventory
+with current source-definition order and rebuilt object starts. The report has
+two deliberately different kinds of rows:
+
+- `U` rows order current source files by their first mapped original function.
+  Multiple address runs or source-order inversions warn that a current file is
+  not good evidence for one historical compilation unit.
+- `B` rows rank adjacent function gaps. The score combines alignment and
+  padding, source transitions, multi-address definitions, tiny helpers, direct
+  calls, shared data references, initializer tables, and persistent frame-mode
+  changes. It is an evidence rank, not a probability.
+
+Use the fast original-layout pass first, then add rebuilt similarity only for
+the shortlist:
+
+```bash
+binary-comp order --config path/to/binary-comp.json --target full \
+  --no-build --no-similarity --show-runs
+binary-comp order --config path/to/binary-comp.json --target full \
+  --no-build --filter InputManager --show-all --limit 0
+```
+
+An unaligned successor is reported as strong evidence against a normal object
+boundary, while compiler-generated chunks belonging to one annotated function
+are kept together. No row proves a translation-unit boundary: test a candidate
+with controlled split/join builds and retain it only if the whole-project report
+and semantic verifiers do not regress.
 
 `binary-comp omf-compare` is for 16-bit DOS reconstruction work where the
 rebuilt artifact is an OMF `.OBJ` instead of a linked executable. It compares
@@ -423,7 +456,7 @@ From the Ghidra UI:
 The script writes:
 
 ```text
-FUN_XXXXXXXX.disassembled.txt  # Ghidra-style assembly consumed by compare/report/calls
+FUN_XXXXXXXX.disassembled.txt  # Ghidra-style assembly consumed by compare/report/order/calls
 FUN_XXXXXXXX.decompiled.txt    # optional decompiler text used by call checks
 globals.h                      # conservative global inventory helper
 strings.txt                    # string inventory helper
@@ -434,6 +467,7 @@ The exported directory can then be used directly by the normal commands:
 ```bash
 binary-comp compare --config path/to/binary-comp.json --target full ScoreTable::score code/FUN_00401000.disassembled.txt
 binary-comp report --config path/to/binary-comp.json --target full
+binary-comp order --config path/to/binary-comp.json --target full --no-build
 binary-comp calls --config path/to/binary-comp.json --target full
 ```
 
