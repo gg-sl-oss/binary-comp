@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from binary_comp.core.disasm import disassemble_x86
+from binary_comp.core.disasm import disassemble_reachable_x86, disassemble_x86
 from binary_comp.core.pe import PEImage
 
 from conftest import TEXT_VA, write_tiny_pe
@@ -77,3 +77,37 @@ def test_disassemble_resyncs_after_an_inline_jump_table(tmp_path):
     assert addresses.isdisjoint(range(table, body))
     # ... and every instruction after it must land on a real boundary.
     assert {body, body + 1, body + 2, body + 3, body + 5} <= addresses
+
+
+def test_reachable_disassembly_follows_shifted_base_jump_table(tmp_path):
+    """Recognize the `shl reg, 2; jmp [reg + table]` switch form."""
+    table = TEXT_VA + 0x10
+    case_zero = TEXT_VA + 0x18
+    case_one = TEXT_VA + 0x1a
+    default = TEXT_VA + 0x1c
+
+    code = bytearray()
+    code.extend(b"\x83\xf8\x01")                         # cmp eax, 1
+    code.extend(b"\x77\x17")                             # ja default
+    code.extend(b"\xc1\xe0\x02")                         # shl eax, 2
+    code.extend(b"\xff\xa0" + struct.pack("<I", table))  # jmp [eax + table]
+    code = code.ljust(0x10, b"\x90")
+    code.extend(struct.pack("<II", case_zero, case_one))
+    code.extend(b"\x40\xc3")                             # case 0
+    code.extend(b"\x48\xc3")                             # case 1
+    code.extend(b"\x33\xc0\xc3")                         # default
+
+    exe = tmp_path / "sample.exe"
+    write_tiny_pe(exe, bytes(code))
+
+    instrs = disassemble_reachable_x86(
+        PEImage(str(exe)),
+        TEXT_VA,
+        [TEXT_VA, TEXT_VA + 0x40],
+        max_bytes=0x40,
+        padding_mnemonics=frozenset({"nop", "int3"}),
+    )
+    addresses = {instr.address for instr in instrs}
+
+    assert addresses.isdisjoint(range(table, case_zero))
+    assert {case_zero, case_zero + 1, case_one, case_one + 1, default, default + 2} <= addresses

@@ -282,8 +282,22 @@ def disassemble_reachable_x86(
         if start <= address < end and address not in decoded and address not in pending:
             pending.append(address)
 
-    def enqueue_jump_table(operand: Operand) -> bool:
-        if operand.kind != "mem" or operand.base or not operand.index or operand.scale != 4:
+    def enqueue_jump_table(
+        operand: Operand,
+        scaled_by_four: frozenset[str],
+    ) -> bool:
+        if operand.kind != "mem":
+            return False
+        indexed_scale = (
+            not operand.base and bool(operand.index) and operand.scale == 4
+        )
+        shifted_base = (
+            bool(operand.base)
+            and not operand.index
+            and operand.scale == 1
+            and operand.base.lower() in scaled_by_four
+        )
+        if not indexed_scale and not shifted_base:
             return False
         table = unsigned32(operand.disp)
         found = False
@@ -300,6 +314,7 @@ def disassemble_reachable_x86(
 
     while pending:
         cursor = pending.pop()
+        scaled_by_four: set[str] = set()
         while start <= cursor < end and cursor not in decoded:
             raw = image.read(cursor, min(15, end - cursor))
             if not raw:
@@ -321,13 +336,24 @@ def disassemble_reachable_x86(
             decoded[cursor] = instruction
             next_addr = cursor + insn.size
 
+            if (
+                mnemonic == "shl"
+                and len(operands) == 2
+                and operands[0].kind == "reg"
+                and operands[1].kind == "imm"
+                and operands[1].imm == 2
+            ):
+                scaled_by_four.add(operands[0].reg.lower())
+            elif operands and operands[0].kind == "reg":
+                scaled_by_four.discard(operands[0].reg.lower())
+
             if mnemonic in {"ret", "retf", "iret", "int3", "hlt", "ud2"}:
                 break
             if mnemonic == "jmp":
                 if operands and operands[0].kind == "imm":
                     enqueue(unsigned32(operands[0].imm))
                 elif operands:
-                    enqueue_jump_table(operands[0])
+                    enqueue_jump_table(operands[0], frozenset(scaled_by_four))
                 break
             if mnemonic.startswith("j") or mnemonic in {"loop", "loope", "loopne"}:
                 if operands and operands[0].kind == "imm":
