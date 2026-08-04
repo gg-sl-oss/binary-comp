@@ -92,7 +92,12 @@ from binary_comp.analyzers.values import ValuesOptions, check_values, format_sum
 from binary_comp.analyzers.vtables import VtableOptions, check_vtables, format_vtable_summary
 from binary_comp.config import ConfigError, DEFAULT_CONFIG_PATH, ProjectTarget, load_project_target
 from binary_comp.source.functions import load_source_groups, map_source_groups
-from binary_comp.core.binary import compare_binary, format_binary_comparison
+from binary_comp.core.binary import (
+    analyze_word_delta,
+    compare_binary,
+    format_binary_comparison,
+    format_word_delta_analysis,
+)
 from binary_comp.core.mz import (
     MzFormatError,
     compare_mz,
@@ -232,6 +237,10 @@ def add_omf_compare_parser(subparsers) -> None:
     parser.add_argument("--ledata-index", type=int, default=0,
                         help="LEDATA record index within selected segment (default: 0)")
     parser.add_argument("--name", default="omf-function", help="Display name for this comparison")
+    parser.add_argument("--max-differences", type=int, default=8,
+                        help="Maximum differing byte locations to print (default: 8)")
+    parser.add_argument("--word-delta", type=lambda value: int(value, 0),
+                        help="Explain differences as little-endian words where original - rebuilt equals DELTA")
     parser.set_defaults(handler=run_omf_compare)
 
 
@@ -257,6 +266,10 @@ def add_tpu_compare_parser(subparsers) -> None:
                         help="Find the block in the image by content (masking fixups) instead of --original-offset; "
                              "for routines inside a Turbo Pascal overlay (.OVR) image")
     parser.add_argument("--name", default="tpu-function", help="Display name for this comparison")
+    parser.add_argument("--max-differences", type=int, default=8,
+                        help="Maximum differing byte locations to print (default: 8)")
+    parser.add_argument("--word-delta", type=lambda value: int(value, 0),
+                        help="Explain differences as little-endian words where original - rebuilt equals DELTA")
     parser.set_defaults(handler=run_tpu_compare)
 
 
@@ -874,6 +887,9 @@ def run_compare(args) -> int:
 
 
 def run_omf_compare(args) -> int:
+    if args.max_differences < 0:
+        print("error: --max-differences must be non-negative", file=sys.stderr)
+        return 2
     try:
         comparison = compare_omf_to_original(
             original_path=args.original,
@@ -889,11 +905,26 @@ def run_omf_compare(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(format_omf_comparison(comparison))
+    output = format_omf_comparison(comparison, context=args.max_differences)
+    if args.word_delta is not None and not comparison.matches:
+        analysis = analyze_word_delta(
+            comparison.original,
+            comparison.rebuilt,
+            delta=args.word_delta,
+            mask=comparison.mask,
+        )
+        output += "\n" + format_word_delta_analysis(
+            analysis,
+            max_words=args.max_differences,
+        )
+    print(output)
     return 0 if comparison.matches else 1
 
 
 def run_tpu_compare(args) -> int:
+    if args.max_differences < 0:
+        print("error: --max-differences must be non-negative", file=sys.stderr)
+        return 2
     if args.original_offset is None and not args.locate:
         print("error: --original-offset is required unless --locate is given", file=sys.stderr)
         return 2
@@ -913,7 +944,19 @@ def run_tpu_compare(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(format_tpu_comparison(comparison))
+    output = format_tpu_comparison(comparison, context=args.max_differences)
+    if args.word_delta is not None and not comparison.matches:
+        analysis = analyze_word_delta(
+            comparison.original,
+            comparison.rebuilt,
+            delta=args.word_delta,
+            mask=comparison.mask,
+        )
+        output += "\n" + format_word_delta_analysis(
+            analysis,
+            max_words=args.max_differences,
+        )
+    print(output)
     return 0 if comparison.matches else 1
 
 

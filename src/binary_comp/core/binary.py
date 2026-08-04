@@ -36,6 +36,26 @@ class BinaryComparison:
         return self.differing_positions == 0
 
 
+@dataclass(frozen=True)
+class WordDeltaMatch:
+    offset: int
+    original: int
+    rebuilt: int
+
+
+@dataclass(frozen=True)
+class WordDeltaAnalysis:
+    delta: int
+    words: tuple[WordDeltaMatch, ...]
+    mismatch_count: int
+    explained_count: int
+    unexplained_offsets: tuple[int, ...]
+
+    @property
+    def complete(self) -> bool:
+        return self.mismatch_count > 0 and not self.unexplained_offsets
+
+
 def compare_binary(original: bytes, rebuilt: bytes) -> BinaryComparison:
     """Compare bytes at the same file/image offsets."""
 
@@ -83,6 +103,126 @@ def compare_binary(original: bytes, rebuilt: bytes) -> BinaryComparison:
         common_prefix=common_prefix,
         common_suffix=common_suffix,
     )
+
+
+def analyze_word_delta(
+    original: bytes,
+    rebuilt: bytes,
+    *,
+    delta: int,
+    mask: bytes | None = None,
+) -> WordDeltaAnalysis:
+    """Explain byte differences as non-overlapping little-endian word deltas.
+
+    ``delta`` is interpreted modulo 65536 as ``original - rebuilt``.  A word
+    is eligible only when both of its bytes are unmasked and at least one byte
+    differs.  Dynamic programming chooses a non-overlapping set that explains
+    the most differing bytes, then uses the fewest words.
+    """
+
+    if len(original) != len(rebuilt):
+        raise ValueError("word-delta analysis requires equal-sized inputs")
+    if mask is None:
+        mask = bytes([0xFF]) * len(original)
+    if len(mask) != len(original):
+        raise ValueError("word-delta mask must match the compared input size")
+
+    size = len(original)
+    normalized_delta = delta & 0xFFFF
+    mismatches = {
+        index
+        for index, (left, right, enabled) in enumerate(zip(original, rebuilt, mask))
+        if enabled and left != right
+    }
+
+    candidates: list[WordDeltaMatch | None] = [None] * size
+    candidate_coverage = [0] * size
+    for offset in range(size - 1):
+        if not mask[offset] or not mask[offset + 1]:
+            continue
+        covered = int(offset in mismatches) + int(offset + 1 in mismatches)
+        if not covered:
+            continue
+        original_word = int.from_bytes(original[offset:offset + 2], "little")
+        rebuilt_word = int.from_bytes(rebuilt[offset:offset + 2], "little")
+        if (original_word - rebuilt_word) & 0xFFFF != normalized_delta:
+            continue
+        candidates[offset] = WordDeltaMatch(offset, original_word, rebuilt_word)
+        candidate_coverage[offset] = covered
+
+    # best_covered/best_words describe the best selection at or after each
+    # byte.  On an otherwise exact tie, prefer the earlier candidate so the
+    # report remains stable.
+    best_covered = [0] * (size + 2)
+    best_words = [0] * (size + 2)
+    take = [False] * size
+    for offset in range(size - 1, -1, -1):
+        skip_score = (best_covered[offset + 1], -best_words[offset + 1])
+        candidate = candidates[offset]
+        if candidate is None:
+            best_covered[offset] = best_covered[offset + 1]
+            best_words[offset] = best_words[offset + 1]
+            continue
+        take_score = (
+            candidate_coverage[offset] + best_covered[offset + 2],
+            -(1 + best_words[offset + 2]),
+        )
+        if take_score >= skip_score:
+            take[offset] = True
+            best_covered[offset] = take_score[0]
+            best_words[offset] = -take_score[1]
+        else:
+            best_covered[offset] = skip_score[0]
+            best_words[offset] = -skip_score[1]
+
+    words: list[WordDeltaMatch] = []
+    covered_offsets: set[int] = set()
+    offset = 0
+    while offset < size:
+        if take[offset]:
+            candidate = candidates[offset]
+            assert candidate is not None
+            words.append(candidate)
+            covered_offsets.update({offset, offset + 1} & mismatches)
+            offset += 2
+        else:
+            offset += 1
+
+    unexplained = tuple(sorted(mismatches - covered_offsets))
+    return WordDeltaAnalysis(
+        delta=normalized_delta,
+        words=tuple(words),
+        mismatch_count=len(mismatches),
+        explained_count=len(covered_offsets),
+        unexplained_offsets=unexplained,
+    )
+
+
+def format_word_delta_analysis(
+    analysis: WordDeltaAnalysis,
+    *,
+    max_words: int = 8,
+) -> str:
+    lines = [
+        f"16-bit little-endian word delta 0x{analysis.delta:04x}",
+        f"  explained differences: {analysis.explained_count} / {analysis.mismatch_count} byte(s)",
+        f"  non-overlapping words: {len(analysis.words)}",
+    ]
+    for word in analysis.words[:max_words]:
+        lines.append(
+            f"    +0x{word.offset:04x}: original=0x{word.original:04x} rebuilt=0x{word.rebuilt:04x}"
+        )
+    if len(analysis.words) > max_words:
+        lines.append(f"    ... {len(analysis.words) - max_words} more")
+    if analysis.unexplained_offsets:
+        shown = analysis.unexplained_offsets[:max_words]
+        offsets = ", ".join(f"+0x{offset:04x}" for offset in shown)
+        if len(analysis.unexplained_offsets) > max_words:
+            offsets += f", ... {len(analysis.unexplained_offsets) - max_words} more"
+        lines.append(f"  unexplained offsets: {offsets}")
+    else:
+        lines.append("  unexplained offsets: none")
+    return "\n".join(lines)
 
 
 def format_binary_comparison(
