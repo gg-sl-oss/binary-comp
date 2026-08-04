@@ -5,10 +5,13 @@ import pytest
 from binary_comp.analyzers.function_compare import format_comparison
 from binary_comp.analyzers.omf import (
     OmfCompareSpec,
+    build_segment_mask,
     compare_omf_spec,
     compare_omf_to_original,
     generate_omf_similarity_report,
+    load_omf_image,
     load_omf_object,
+    parse_fixupp_locations,
 )
 from binary_comp.analyzers.report import SimilarityReportOptions, format_similarity_report
 from binary_comp.config import BuildConfig, ProjectTarget
@@ -33,6 +36,81 @@ def test_omf_parser_reads_ledata_and_fixupp(tmp_path):
     assert ledata[0].segment_index == 1
     assert ledata[0].data == bytes.fromhex("55 8b ec a2 00 00 cb")
     assert [(fixup.offset, fixup.length) for fixup in fixups] == [(4, 2)]
+
+
+def test_omf_image_reads_fragmented_32_bit_records(tmp_path):
+    obj = tmp_path / "sample32.obj"
+    obj.write_bytes(
+        omf_record(
+            0xA1,
+            b"\x01\x10\x00\x00\x00" + bytes.fromhex("90 e8 00 00 00 00 c3"),
+        )
+        + omf_record(0x9D, b"\xa4\x02\x16\x02\x01")
+        + omf_record(0xA1, b"\x01\x20\x00\x00\x00\xcc")
+        + omf_record(0xA1, b"\x02\x00\x00\x00\x00\xc3")
+        + omf_record(
+            0x91,
+            b"\x00\x01\x05entry\x10\x00\x00\x00\x00",
+        )
+    )
+
+    image = load_omf_image(obj)
+
+    assert image.segments[1][0x10:0x17] == bytes.fromhex("90 e8 00 00 00 00 c3")
+    assert image.segments[1][0x20] == 0xCC
+    assert image.segments[2] == b"\xc3"
+    assert image.publics["entry"] == (1, 0x10)
+    assert [
+        (fixup.segment_index, fixup.offset, fixup.length, fixup.location_type)
+        for fixup in image.fixups
+    ] == [(1, 0x12, 4, 9)]
+    assert build_segment_mask(
+        7,
+        image.fixups,
+        segment_index=1,
+        object_offset=0x10,
+    ) == bytes.fromhex("ff ff 00 00 00 00 ff")
+    assert build_segment_mask(
+        1,
+        image.fixups,
+        segment_index=2,
+    ) == b"\xff"
+
+
+def test_fixupp32_parser_consumes_threaded_two_byte_indexes():
+    # FRAME thread F1/group 0x123, TARGET thread T2/external 0x124, then a
+    # self-relative 32-bit fixup that refers to both threads.
+    content = bytes.fromhex("44 81 23 09 81 24 a4 01 8d")
+
+    fixups = parse_fixupp_locations(
+        content,
+        displacement_width=4,
+        segment_index=3,
+        ledata_offset=0x200,
+    )
+
+    assert [
+        (fixup.segment_index, fixup.offset, fixup.length, fixup.location_type)
+        for fixup in fixups
+    ] == [(3, 0x201, 4, 9)]
+
+
+def test_fixupp32_parser_consumes_four_byte_target_displacement():
+    # The displacement deliberately contains high-bit bytes that must not be
+    # mistaken for another FIXUP subrecord.
+    content = bytes.fromhex("a4 01 50 01 80 90 a4 ff a4 08 54 01")
+
+    fixups = parse_fixupp_locations(
+        content,
+        displacement_width=4,
+        segment_index=2,
+        ledata_offset=0x40,
+    )
+
+    assert [(fixup.offset, fixup.length) for fixup in fixups] == [
+        (0x41, 4),
+        (0x48, 4),
+    ]
 
 
 def test_omf_compare_masks_fixup_operands(tmp_path):

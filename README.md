@@ -332,6 +332,14 @@ raw original bytes against a selected OMF `LEDATA` range and masks `FIXUPP`
 relocation operands, which is useful for early Borland C/C++ matching before
 the RTLink/link step is modeled.
 
+The reusable OMF image API also supports 32-bit DOS adapters. `load_omf_image`
+assembles fragmented `LEDATA`/`LEDATA32` records into per-segment byte images,
+indexes 16/32-bit `PUBDEF` and `LPUBDEF` symbols, and projects deterministic
+`FIXUPP`/`FIXUPP32` patch locations into those images. `build_segment_mask`
+then masks only the linker-written operands in a selected segment window. The
+parser follows the standard Intel/IBM/Microsoft location types; it deliberately
+does not reinterpret the conflicting PharLap values.
+
 `byte-compare` reports exact same-offset identity, size deltas, differing runs,
 and common prefixes/suffixes for arbitrary binary images. It intentionally does
 not call that metric semantic similarity: inserted or shifted code remains a
