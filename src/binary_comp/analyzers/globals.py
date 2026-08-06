@@ -2068,6 +2068,12 @@ def disasm_index_stride(content: str) -> int:
     return min(strides) if strides else 1
 
 
+def disasm_index_constant_displacement(content: str) -> int:
+    without_scales = DISASM_SCALE_RE.sub("", content)
+    without_registers = DISASM_REGISTER_RE.sub("", without_scales)
+    return disasm_constant_displacement(without_registers)
+
+
 def source_decl_containing_address(address: int,
                                    decls: Sequence[GlobalDecl],
                                    starts: Sequence[int]) -> Optional[GlobalDecl]:
@@ -2273,6 +2279,7 @@ def find_rebuilt_asm_global_span_issues(decls: Sequence[GlobalDecl],
 
     issues: List[Issue] = []
     seen: Set[Tuple[str, int, int]] = set()
+    indexed_seen: Set[Tuple[str, int, int, int]] = set()
     for filename in sorted(os.listdir(asm_dir)):
         if not filename.endswith(".asm"):
             continue
@@ -2296,27 +2303,53 @@ def find_rebuilt_asm_global_span_issues(decls: Sequence[GlobalDecl],
                 access_size = inferred_disasm_memory_access_size(line, operands, operand_index)
                 if access_size is None or access_size <= 1:
                     continue
+                indexed_contents = [
+                    content for content in DISASM_BRACKET_RE.findall(operand)
+                    if DISASM_REGISTER_RE.search(content) is not None
+                    and DISASM_SCALE_RE.search(content) is not None
+                ]
                 for name, offset in rebuilt_symbol_refs_from_operand(operand, decls_by_name):
                     decl = decls_by_name[name]
-                    if offset < 0 or offset + access_size <= (decl.size or 0):
-                        continue
-                    key = (name, offset, access_size)
-                    if key in seen:
-                        continue
-                    seen.add(key)
                     display_path = os.path.relpath(path)
-                    issues.append(Issue(
-                        "REBUILT_GLOBAL_SYMBOL_SPAN",
-                        decl.address,
-                        decl.name,
-                        decl.line,
-                        decl.size or 0,
-                        b"",
-                        None,
-                        f"rebuilt asm access at {display_path}:{line_no}: {line}; "
-                        f"symbol offset 0x{offset:x}, access size {access_size} "
-                        f"reaches 0x{offset + access_size:x}, past source size 0x{decl.size or 0:x}",
-                    ))
+                    if offset >= 0 and offset + access_size > (decl.size or 0):
+                        key = (name, offset, access_size)
+                        if key not in seen:
+                            seen.add(key)
+                            issues.append(Issue(
+                                "REBUILT_GLOBAL_SYMBOL_SPAN",
+                                decl.address,
+                                decl.name,
+                                decl.line,
+                                decl.size or 0,
+                                b"",
+                                None,
+                                f"rebuilt asm access at {display_path}:{line_no}: {line}; "
+                                f"symbol offset 0x{offset:x}, access size {access_size} "
+                                f"reaches 0x{offset + access_size:x}, past source size 0x{decl.size or 0:x}",
+                            ))
+                    for content in indexed_contents:
+                        displacement = disasm_index_constant_displacement(content)
+                        stride = disasm_index_stride(content)
+                        first_indexed_end = offset + displacement + stride + access_size
+                        if first_indexed_end <= (decl.size or 0):
+                            continue
+                        key = (name, offset + displacement, stride, access_size)
+                        if key in indexed_seen:
+                            continue
+                        indexed_seen.add(key)
+                        issues.append(Issue(
+                            "REBUILT_INDEXED_GLOBAL_ESCAPE",
+                            decl.address,
+                            decl.name,
+                            decl.line,
+                            decl.size or 0,
+                            b"",
+                            None,
+                            f"rebuilt indexed access at {display_path}:{line_no}: {line}; "
+                            f"symbol offset {offset + displacement:+#x}, stride {stride}, "
+                            f"access size {access_size} can reach {first_indexed_end:#x}, "
+                            f"past source size 0x{decl.size or 0:x}",
+                        ))
     return issues
 
 

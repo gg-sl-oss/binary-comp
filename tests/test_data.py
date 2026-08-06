@@ -312,6 +312,85 @@ def test_rebuilt_layout_check_ignores_constant_in_bounds_field_access(tmp_path):
     assert issues == []
 
 
+def test_rebuilt_layout_check_reports_rebuilt_indexed_scalar_escape(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text("", encoding="utf-8")
+    asm_dir = tmp_path / "out"
+    asm_dir.mkdir()
+    (asm_dir / "sample.asm").write_text(
+        "_TEXT SEGMENT\n"
+        "_Run PROC NEAR ; Run\n"
+        "    cmp DWORD PTR _g_Flag_00402000[eax*4], 0\n"
+        "_Run ENDP\n"
+        "_TEXT ENDS\n",
+        encoding="utf-8",
+    )
+    flag = AuditGlobalDecl(0x402000, "g_Flag_00402000", "", 1, "int", [], False, None, 4)
+
+    issues = build_rebuilt_layout_issues(
+        [flag],
+        str(map_path),
+        0,
+        asm_dir=str(asm_dir),
+    )
+
+    assert [(issue.category, issue.name) for issue in issues] == [
+        ("REBUILT_INDEXED_GLOBAL_ESCAPE", "g_Flag_00402000"),
+    ]
+    assert "stride 4" in issues[0].detail
+    assert "past source size 0x4" in issues[0].detail
+
+
+def test_rebuilt_layout_check_ignores_rebuilt_indexed_array_access(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text("", encoding="utf-8")
+    asm_dir = tmp_path / "out"
+    asm_dir.mkdir()
+    (asm_dir / "sample.asm").write_text(
+        "_TEXT SEGMENT\n"
+        "_Run PROC NEAR ; Run\n"
+        "    mov eax, DWORD PTR _g_Items_00402000[ecx*4]\n"
+        "_Run ENDP\n"
+        "_TEXT ENDS\n",
+        encoding="utf-8",
+    )
+    items = AuditGlobalDecl(0x402000, "g_Items_00402000", "", 1, "int", ["4"], False, None, 16)
+
+    issues = build_rebuilt_layout_issues(
+        [items],
+        str(map_path),
+        0,
+        asm_dir=str(asm_dir),
+    )
+
+    assert issues == []
+
+
+def test_rebuilt_layout_check_ignores_rebased_indexed_array_access(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text("", encoding="utf-8")
+    asm_dir = tmp_path / "out"
+    asm_dir.mkdir()
+    (asm_dir / "sample.asm").write_text(
+        "_TEXT SEGMENT\n"
+        "_Run PROC NEAR ; Run\n"
+        "    mov eax, DWORD PTR _g_Items_00402000[ecx*4-4]\n"
+        "_Run ENDP\n"
+        "_TEXT ENDS\n",
+        encoding="utf-8",
+    )
+    items = AuditGlobalDecl(0x402000, "g_Items_00402000", "", 1, "int", ["1"], False, None, 4)
+
+    issues = build_rebuilt_layout_issues(
+        [items],
+        str(map_path),
+        0,
+        asm_dir=str(asm_dir),
+    )
+
+    assert issues == []
+
+
 def test_find_missing_globals_reports_uncovered_dwords(fixture_root, tmp_path):
     from conftest import write_tiny_pe
 

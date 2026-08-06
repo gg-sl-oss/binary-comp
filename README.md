@@ -257,7 +257,7 @@ bytes.
 | `order` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | Ranks compilation-unit order and boundary hints. `code_export_dir` adds call, data-reference, helper-size, and frame-mode evidence. |
 | `values` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | `code_export_dir` improves original function boundaries. Capstone is required. |
 | `data` | `original_exe`, `rebuilt_exe`, `map`, `globals_source` | Compares globals with encoded or commented original addresses. |
-| `globals` | `original_exe`, `globals_source` | Optional headers and `auto_complete` broaden coverage. |
+| `globals` | `original_exe`, `globals_source` | Optional headers and `auto_complete` broaden coverage. `--check-rebuilt-layout` also needs the rebuilt MAP/assembly for relocation-sensitive access checks. |
 | `calls` | `source_dirs`, `code_export_dir`, `asm_dir` | Compares call target multisets from original exports and rebuilt assembly listings. |
 | `global-access` | `source_dirs`, `code_export_dir`, `asm_dir` | Compares read/write multisets for global data references. |
 | `vtables` | `original_exe`, `source_dirs`, `code_export_dir` | Reads vtable bytes and constructor vptr writes from the original PE. |
@@ -272,6 +272,8 @@ binary-comp compare --config path/to/binary-comp.json --target full ScoreTable::
 binary-comp values --config path/to/binary-comp.json --target full --filter ScoreTable::score
 binary-comp data --config path/to/binary-comp.json --target full --verbose
 binary-comp globals --config path/to/binary-comp.json --target full --fail-on-issues
+binary-comp globals --config path/to/binary-comp.json --target full \
+  --check-rebuilt-layout --issue-kind REBUILT_INDEXED_GLOBAL_ESCAPE
 binary-comp calls --config path/to/binary-comp.json --target full --fail-on-mismatches
 binary-comp global-access --config path/to/binary-comp.json --target full --include-address-immediates
 binary-comp report --config path/to/binary-comp.json --target full
@@ -291,6 +293,11 @@ binary-comp omf-compare --original overlay.bin --original-offset 0x0 --object UN
 binary-comp tpu-compare --original overlay.bin --original-offset 0x1a40 --tpu UNIT.TPU --block 3
 binary-comp tpu-compare --original PROG.OVR --tpu UNIT.TPU --block 3 --locate
 ```
+
+`REBUILT_INDEXED_GLOBAL_ESCAPE` reports scaled rebuilt-assembly accesses whose
+first nonzero index already exceeds the referenced source global. This commonly
+reveals source that treats adjacent original globals as one array even though
+the linker relocated those globals independently in the rebuilt image.
 
 Most analyzers that read rebuilt code will run the configured build command
 first unless `--no-build` is supplied.
