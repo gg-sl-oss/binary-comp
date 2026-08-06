@@ -207,6 +207,25 @@ def build_call_target_names(function_groups: list[FunctionGroup]) -> tuple[dict[
     return original_targets, rebuilt_targets
 
 
+def relocated_displacement(instr: Instruction, sites: frozenset[int]) -> bool:
+    """Is this instruction's memory displacement one the loader patches?
+
+    Then it is a global's address, not a struct member offset, and the two
+    images can never agree on it.  An instruction can carry a relocated
+    displacement and an honest immediate at once -- `test byte [global], 4` --
+    so the two fields have to be asked about separately.
+    """
+    return bool(sites) and instr.disp_offset > 0 and \
+        (instr.address + instr.disp_offset) in sites
+
+
+def relocated_immediate(instr: Instruction, sites: frozenset[int]) -> bool:
+    """Is this instruction's immediate one the loader patches?  Then it is an
+    unresolved address rather than a value the source chose."""
+    return bool(sites) and instr.imm_offset > 0 and \
+        (instr.address + instr.imm_offset) in sites
+
+
 def load_boundary_file(path: str | None) -> set[int]:
     """Read a plain list of original function addresses.
 
@@ -3217,8 +3236,8 @@ def report_string_mismatch(
     ):
         return None
     compiled, original = compiled_instrs[ci], original_instrs[oi]
-    if (compiled.address + compiled.size - 4) in context.compiled_relocated or \
-            (original.address + original.size - 4) in context.original_relocated:
+    if relocated_immediate(compiled, context.compiled_relocated) or \
+            relocated_immediate(original, context.original_relocated):
         return None
     return ("string", c_str, o_str, compiled, original)
 
@@ -3396,8 +3415,8 @@ def compare_instruction_pair(
             o_op.imm,
         ):
             continue
-        if (compiled.address + compiled.size - 4) in context.compiled_relocated or \
-                (original.address + original.size - 4) in context.original_relocated:
+        if relocated_immediate(compiled, context.compiled_relocated) or \
+                relocated_immediate(original, context.original_relocated):
             continue
         warnings.append(("imm", c_op.imm, o_op.imm, compiled, original))
 
@@ -3478,8 +3497,8 @@ def compare_instruction_pair(
                 continue
             # A displacement the loader relocates is a global's address used as
             # an index base, not a struct member offset.
-            if (compiled.address + compiled.size - 4) in context.compiled_relocated or \
-                    (original.address + original.size - 4) in context.original_relocated:
+            if relocated_displacement(compiled, context.compiled_relocated) or \
+                    relocated_displacement(original, context.original_relocated):
                 continue
             warnings.append(("offset", c_op.disp, o_op.disp, compiled, original))
 

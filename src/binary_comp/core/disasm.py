@@ -37,6 +37,10 @@ class Instruction:
     operands: tuple[Operand, ...]
     raw: str
     size: int = 0
+    # Where the encoded displacement and immediate start within the
+    # instruction, so a caller can tell which field a relocation patches.
+    disp_offset: int = 0
+    imm_offset: int = 0
 
 
 def require_capstone() -> None:
@@ -193,6 +197,7 @@ def sweep_x86(
             if mnemonic in padding_mnemonics:
                 continue
             operands = tuple(make_operand(insn, op) for op in insn.operands)
+            encoding = getattr(insn, "encoding", None)
             instructions.append(Instruction(
                 address=insn.address,
                 mnemonic=mnemonic,
@@ -200,6 +205,8 @@ def sweep_x86(
                 operands=operands,
                 raw=f"{insn.mnemonic} {insn.op_str}".strip(),
                 size=insn.size,
+                disp_offset=getattr(encoding, "disp_offset", 0) or 0,
+                imm_offset=getattr(encoding, "imm_offset", 0) or 0,
             ))
 
         if cursor < stop:
