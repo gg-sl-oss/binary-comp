@@ -117,6 +117,8 @@ def add_values_parser(subparsers) -> None:
     parser.add_argument("--min-similarity", type=float, default=0.0,
                         help="Only report mismatches at or above this similarity percentage")
     parser.add_argument("--boundary-report", action="store_true", help="Print function-boundary inventory")
+    parser.add_argument("--similarity", action="store_true",
+                        help="Also print per-source instruction similarity for every function compared")
     parser.add_argument("--strings-only", action="store_true", help="Only report string literal mismatches")
     parser.add_argument("--no-strings", action="store_true", help="Do not report string literal mismatches")
     parser.add_argument("--no-immediates", action="store_true", help="Do not report small numeric immediate mismatches")
@@ -633,7 +635,8 @@ def run_values(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(format_summary(summary, min_similarity=args.min_similarity))
+    print(format_summary(summary, min_similarity=args.min_similarity,
+                         show_similarity=args.similarity))
     return 0
 
 

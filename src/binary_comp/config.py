@@ -43,6 +43,7 @@ class ProjectTarget:
     define_headers: tuple[str, ...] = ()
     auto_complete: str | None = None
     code_dir: str | None = None
+    original_boundaries: str | None = None
     asm_dir: str | None = None
     map_skip: str | None = None
     library_ranges: tuple[tuple[int, int], ...] = ()
@@ -225,6 +226,8 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
             optional_string(target_cfg, "code_export_dir") or optional_string(target_cfg, "code_dir"),
             base,
         ),
+        original_boundaries=_resolve_standalone_path(
+            optional_string(target_cfg, "original_boundaries"), base),
         asm_dir=_resolve_standalone_path(
             optional_string(target_cfg, "asm_dir") or optional_string(target_cfg, "out_dir"),
             base,

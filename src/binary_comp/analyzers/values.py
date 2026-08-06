@@ -88,6 +88,9 @@ class ValuesSummary:
     unmapped_source_groups: int
     boundary_inventory: dict[str, int]
     reports: tuple[tuple[FunctionGroup, CheckResult], ...]
+    # Every function compared, not only the ones that differ, so a single run
+    # answers "how close is the whole project" as well as "what is wrong".
+    similarity: tuple[tuple[str, float], ...] = ()
 
 
 def default_policy_path() -> str:
@@ -204,8 +207,35 @@ def build_call_target_names(function_groups: list[FunctionGroup]) -> tuple[dict[
     return original_targets, rebuilt_targets
 
 
-def load_original_boundary_starts(code_dir: str | None, function_groups: list[FunctionGroup]) -> list[int]:
+def load_boundary_file(path: str | None) -> set[int]:
+    """Read a plain list of original function addresses.
+
+    A Ghidra export supplies boundaries for projects that have one; a project
+    that located its functions some other way can hand over the addresses
+    directly.  One address per line, `#` starts a comment, anything else on the
+    line is ignored so a locator report can be filtered into it unchanged."""
+    starts: set[int] = set()
+    if not path or not os.path.exists(path):
+        return starts
+    with open(path, "r", encoding="latin1", errors="ignore") as handle:
+        for line in handle:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            try:
+                starts.add(int(line.split()[0], 16))
+            except ValueError:
+                continue
+    return starts
+
+
+def load_original_boundary_starts(
+    code_dir: str | None,
+    function_groups: list[FunctionGroup],
+    boundary_file: str | None = None,
+) -> list[int]:
     starts = set(function_starts_from_export_dir(code_dir))
+    starts |= load_boundary_file(boundary_file)
     for group in function_groups:
         starts.update(group.original_addrs)
     return sorted(starts)
@@ -3707,7 +3737,8 @@ def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesO
             if options.file_filter in os.path.basename(group.source_path) or options.file_filter in group.name
         ]
 
-    original_starts = load_original_boundary_starts(target.code_dir, mapped_groups)
+    original_starts = load_original_boundary_starts(
+        target.code_dir, mapped_groups, target.original_boundaries)
     rebuilt_starts = function_starts_from_map(entries_by_obj)
     boundary_inventory = {}
     if options.boundary_report:
@@ -3740,12 +3771,14 @@ def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesO
     skipped_no_bytes = 0
     reports: list[tuple[FunctionGroup, CheckResult]] = []
 
+    similarity: list[tuple[str, float]] = []
     for group in mapped_groups:
         total += 1
         result = check_function(group, original_image, rebuilt_image, original_starts, rebuilt_starts, context)
         if result is None:
             skipped_no_bytes += 1
             continue
+        similarity.append((group.source_path, result.similarity))
         if not result.warnings:
             continue
         if result.similarity < options.min_similarity:
@@ -3765,10 +3798,12 @@ def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesO
         unmapped_source_groups=len(missing_groups),
         boundary_inventory=boundary_inventory,
         reports=tuple(reports),
+        similarity=tuple(similarity),
     )
 
 
-def format_summary(summary: ValuesSummary, min_similarity: float = 0.0) -> str:
+def format_summary(summary: ValuesSummary, min_similarity: float = 0.0,
+                   show_similarity: bool = False) -> str:
     lines: list[str] = []
     if summary.boundary_inventory:
         inventory = summary.boundary_inventory
@@ -3824,4 +3859,27 @@ def format_summary(summary: ValuesSummary, min_similarity: float = 0.0) -> str:
         lines.append(f"Skipped (similarity < {min_similarity:.1f}%): {summary.skipped_below_threshold}")
     if summary.unmapped_source_groups:
         lines.append(f"Unmapped source groups: {summary.unmapped_source_groups}")
+    if show_similarity and summary.similarity:
+        lines.extend(["", format_similarity_breakdown(summary)])
+    return "\n".join(lines)
+
+
+def format_similarity_breakdown(summary: ValuesSummary) -> str:
+    """Per-source instruction similarity, so one run answers how close the
+    whole project is as well as which values are wrong."""
+    by_source: dict[str, list[float]] = {}
+    for source_path, value in summary.similarity:
+        by_source.setdefault(os.path.basename(source_path), []).append(value)
+    rows = sorted(
+        ((name, len(values), sum(values) / len(values)) for name, values in by_source.items()),
+        key=lambda row: (row[2] * row[1] - 100.0 * row[1]),
+    )
+    lines = ["--- Similarity ---", f"{'source':<20}{'funcs':>7}{'average':>10}{'deficit':>10}"]
+    for name, count, average in rows:
+        if average >= 100.0:
+            continue
+        lines.append(f"{name:<20}{count:>7}{average:>9.2f}%{(100.0 - average) * count:>10.1f}")
+    total = sum(len(values) for values in by_source.values())
+    overall = sum(sum(values) for values in by_source.values()) / total
+    lines.append(f"\nfunctions {total}   weighted average {overall:.2f}%")
     return "\n".join(lines)
