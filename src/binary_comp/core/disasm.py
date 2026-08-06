@@ -252,6 +252,33 @@ def disassemble_x86(
         instructions = trim_seh_cleanup_funclets(instructions)
     while instructions and instructions[-1].mnemonic in padding_mnemonics:
         instructions.pop()
+    return trim_trailing_data(instructions)
+
+
+TERMINATOR_MNEMONICS = frozenset({"ret", "retf", "iret", "iretd", "jmp"})
+
+
+def trim_trailing_data(instructions: list[Instruction]) -> list[Instruction]:
+    """Drop what a linear sweep decoded past the end of the function body.
+
+    A sweep bounded by the next known entry point runs on into whatever the
+    linker put in the gap -- alignment, a switch table, a constant pool -- and
+    turns it into plausible-looking instructions.  Real code after the last
+    return or unconditional jump has to be branched to from inside the
+    function, so the last instruction that is either a control transfer or a
+    branch target marks the end of the body.  A function with neither is left
+    alone.
+    """
+    targets = {
+        operand.imm
+        for insn in instructions
+        for operand in insn.operands
+        if operand.kind == "imm"
+    }
+    for index in range(len(instructions) - 1, -1, -1):
+        insn = instructions[index]
+        if insn.mnemonic in TERMINATOR_MNEMONICS or insn.address in targets:
+            return instructions[: index + 1]
     return instructions
 
 
