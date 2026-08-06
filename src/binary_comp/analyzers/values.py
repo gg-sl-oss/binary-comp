@@ -3527,6 +3527,8 @@ def check_candidate(
         context,
     )
 
+    matches = matches_in_aligned_runs(matches)
+
     warnings: list[tuple] = []
     for ci, oi in matches:
         warnings.extend(compare_instruction_pair(
@@ -3539,6 +3541,38 @@ def check_candidate(
             context,
         ))
     return similarity, tuple(warnings)
+
+
+MIN_ALIGNED_RUN = 3
+
+
+def matches_in_aligned_runs(
+    matches: list[tuple[int, int]],
+    minimum: int = MIN_ALIGNED_RUN,
+) -> list[tuple[int, int]]:
+    """Keep only pairs sitting inside a run of consecutive aligned instructions.
+
+    An aligner asked to line up two streams that have diverged will still pair
+    isolated instructions across the gap, because a lone `mov` matches any other
+    `mov`.  Comparing the operands of such a pair reports a difference between
+    two instructions that have nothing to do with each other.  Requiring both
+    sides to step forward together for a few instructions is what distinguishes
+    a real correspondence from a coincidence.
+    """
+    if not matches:
+        return matches
+    kept: list[tuple[int, int]] = []
+    run = [matches[0]]
+    for previous, current in zip(matches, matches[1:]):
+        if current[0] == previous[0] + 1 and current[1] == previous[1] + 1:
+            run.append(current)
+            continue
+        if len(run) >= minimum:
+            kept.extend(run)
+        run = [current]
+    if len(run) >= minimum:
+        kept.extend(run)
+    return kept
 
 
 def instruction_value_anchor(
