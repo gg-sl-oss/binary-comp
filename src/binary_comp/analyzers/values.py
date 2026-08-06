@@ -20,7 +20,8 @@ from binary_comp.core.disasm import (
     unsigned32,
 )
 from binary_comp.core.ghidra import function_starts_from_export_dir
-from binary_comp.core.mapfile import function_starts_from_map
+from binary_comp.core.le import LEImage
+from binary_comp.core.mapfile import function_starts_from_map, parse_watcom_map_by_obj
 from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import canonical_function_name
 from binary_comp.source.functions import FunctionGroup, load_source_groups, map_source_groups
@@ -60,6 +61,11 @@ class CompareContext:
     original_diagnostic_targets: frozenset[int]
     compiled_call_targets: dict[int, str] = field(default_factory=dict)
     original_call_targets: dict[int, str] = field(default_factory=dict)
+    # Addresses whose trailing operand a loader relocates.  An immediate
+    # sitting on one is a link-time placeholder for an address, not a value the
+    # source chose, so the two images can never agree on it.
+    compiled_relocated: frozenset[int] = frozenset()
+    original_relocated: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -3180,7 +3186,11 @@ def report_string_mismatch(
         and nearby_calls_target(original_instrs, oi, context.original_diagnostic_targets)
     ):
         return None
-    return ("string", c_str, o_str, compiled_instrs[ci], original_instrs[oi])
+    compiled, original = compiled_instrs[ci], original_instrs[oi]
+    if (compiled.address + compiled.size - 4) in context.compiled_relocated or \
+            (original.address + original.size - 4) in context.original_relocated:
+        return None
+    return ("string", c_str, o_str, compiled, original)
 
 
 def compare_instruction_pair(
@@ -3356,6 +3366,9 @@ def compare_instruction_pair(
             o_op.imm,
         ):
             continue
+        if (compiled.address + compiled.size - 4) in context.compiled_relocated or \
+                (original.address + original.size - 4) in context.original_relocated:
+            continue
         warnings.append(("imm", c_op.imm, o_op.imm, compiled, original))
 
     c_mems = dict(memory_operands(compiled))
@@ -3432,6 +3445,11 @@ def compare_instruction_pair(
             ):
                 continue
             if (c_op.disp == 0 or o_op.disp == 0) and (has_pointer_immediate(compiled) or has_pointer_immediate(original)):
+                continue
+            # A displacement the loader relocates is a global's address used as
+            # an index base, not a struct member offset.
+            if (compiled.address + compiled.size - 4) in context.compiled_relocated or \
+                    (original.address + original.size - 4) in context.original_relocated:
                 continue
             warnings.append(("offset", c_op.disp, o_op.disp, compiled, original))
 
@@ -3662,8 +3680,25 @@ def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesO
         if not os.path.exists(path):
             raise FileNotFoundError(f"missing {label}: {path}")
 
+    # A linear executable carries an object table rather than PE sections, and
+    # Watcom writes a different map, but everything downstream only needs bytes
+    # at a virtual address and a symbol's address, so the two formats are
+    # interchangeable behind these three lookups.
+    linear = target.kind == "dos32-le-omf"
+    if linear:
+        original_image = LEImage(target.original_exe)
+        rebuilt_image = LEImage(target.rebuilt_exe)
+        toolchain = "watcom"
+        entries = parse_watcom_map_by_obj(target.map_path, rebuilt_image.segment_bases())
+    else:
+        original_image = PEImage(target.original_exe)
+        rebuilt_image = PEImage(target.rebuilt_exe)
+        toolchain = "msvc"
+        entries = None
+
     groups_by_source = load_source_groups(target.source_dirs, target.map_skip, target.source_excludes)
-    mapped_groups, missing_groups, entries_by_obj = map_source_groups(groups_by_source, target.map_path)
+    mapped_groups, missing_groups, entries_by_obj = map_source_groups(
+        groups_by_source, target.map_path, entries_by_obj=entries, toolchain=toolchain)
     original_call_targets, rebuilt_call_targets = build_call_target_names(mapped_groups)
 
     if options.file_filter:
@@ -3685,8 +3720,6 @@ def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesO
             "missing_map_groups": len(missing_groups),
         }
 
-    original_image = PEImage(target.original_exe)
-    rebuilt_image = PEImage(target.rebuilt_exe)
     original_diag_targets, rebuilt_diag_targets = build_diagnostic_targets(mapped_groups, policy)
     context = CompareContext(
         enabled_kinds=options.enabled_kinds,
@@ -3696,6 +3729,8 @@ def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesO
         original_diagnostic_targets=original_diag_targets,
         compiled_call_targets=rebuilt_call_targets,
         original_call_targets=original_call_targets,
+        compiled_relocated=rebuilt_image.relocated_sites() if linear else frozenset(),
+        original_relocated=original_image.relocated_sites() if linear else frozenset(),
     )
 
     total = 0

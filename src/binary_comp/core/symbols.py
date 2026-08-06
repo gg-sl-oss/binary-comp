@@ -157,7 +157,7 @@ def canonical_function_name(name: str) -> str:
     return split_name_parameters(name)
 
 
-def symbol_patterns_for_function(name: str) -> list[str]:
+def symbol_patterns_for_function(name: str, toolchain: str = "msvc") -> list[str]:
     base = split_name_parameters(name)
     if "::" in base:
         class_name, method_name = base.rsplit("::", 1)
@@ -169,6 +169,10 @@ def symbol_patterns_for_function(name: str) -> list[str]:
         return [f"?{method_name}@{class_leaf}@@"]
     # `?name@@...` is C++; `@name@N` is C __fastcall, `_name@N` C __stdcall and
     # `_name` C __cdecl.  A source tree compiled as C emits the last three.
+    if toolchain == "watcom":
+        # Watcom decorates with a trailing underscore for its register calling
+        # convention and both underscores for the stack one.
+        return [f"{base}_", f"_{base}_", f"_{base}"]
     return [f"?{base}@@", f"@{base}@", f"_{base}@", f"_{base}"]
 
 

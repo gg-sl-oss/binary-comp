@@ -68,14 +68,21 @@ def map_source_groups(
     groups_by_source: dict[str, list[SourceFunctionGroup]],
     map_path: str,
     signature_names: frozenset[str] = frozenset(),
+    entries_by_obj: dict[str, list[MapEntry]] | None = None,
+    toolchain: str = "msvc",
 ) -> tuple[list[FunctionGroup], list[tuple[str, SourceFunctionGroup]], dict[str, list[MapEntry]]]:
-    entries_by_obj = parse_msvc_map_by_obj(map_path)
+    if entries_by_obj is None:
+        entries_by_obj = parse_msvc_map_by_obj(map_path)
     mapped: list[FunctionGroup] = []
     missing: list[tuple[str, SourceFunctionGroup]] = []
 
+    # Map files do not agree on case: MSVC echoes the object path as the build
+    # spelled it, Watcom upper-cases it.  Match on the folded name.
+    entries_by_folded = {key.lower(): value for key, value in entries_by_obj.items()}
+
     for source_path in sorted(groups_by_source):
         obj = os.path.splitext(os.path.basename(source_path))[0] + ".obj"
-        obj_entries = entries_by_obj.get(obj, [])
+        obj_entries = entries_by_obj.get(obj) or entries_by_folded.get(obj.lower(), [])
         used: set[int] = set()
 
         for group in groups_by_source[source_path]:
@@ -93,7 +100,7 @@ def map_source_groups(
                         break
 
             if hit is None:
-                patterns = symbol_patterns_for_function(group.name)
+                patterns = symbol_patterns_for_function(group.name, toolchain)
                 for idx, entry in enumerate(obj_entries):
                     if idx in used:
                         continue

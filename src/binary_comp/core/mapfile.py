@@ -140,3 +140,53 @@ def parse_encoded_address_symbols(map_path: str) -> list[EncodedAddressMapEntry]
 
     entries.sort(key=lambda entry: (entry.original_va, entry.symbol, entry.rebuilt_va))
     return entries
+
+
+WATCOM_MODULE_RE = re.compile(r"^Module:\s+(\S+)", re.IGNORECASE)
+# The map flags each symbol in place: `*` unreferenced, `+` referenced only
+# within its own module.  Both sit against the address, not the name.
+WATCOM_SYMBOL_RE = re.compile(
+    r"^(?P<segment>[0-9a-fA-F]{4}):(?P<offset>[0-9a-fA-F]{8})[*+]?\s+(?P<symbol>\S+)")
+
+
+def parse_watcom_map_by_obj(
+    map_path: str,
+    segment_bases: dict[int, int],
+    code_segment: int = 1,
+) -> dict[str, list[MapEntry]]:
+    """Parse a Watcom linker map into per-object symbol lists.
+
+    Watcom writes `Module: DIR\\NAME.OBJ(source)` headers followed by
+    `ssss:oooooooo symbol` lines, where the segment number indexes the image's
+    object table.  Only the code segment carries functions, so the rest is
+    skipped; `segment_bases` supplies the load address each segment gets.
+    """
+    entries_by_obj: dict[str, list[MapEntry]] = {}
+    if not os.path.exists(map_path):
+        return entries_by_obj
+
+    current: str | None = None
+    with open(map_path, "r", encoding="latin1", errors="ignore") as handle:
+        for line in handle:
+            module = WATCOM_MODULE_RE.match(line.strip())
+            if module:
+                name = module.group(1).split("(")[0]
+                current = os.path.basename(name.replace("\\", "/")).lower()
+                continue
+            if current is None:
+                continue
+            hit = WATCOM_SYMBOL_RE.match(line.strip())
+            if not hit:
+                continue
+            segment = int(hit.group("segment"), 16)
+            if segment != code_segment:
+                continue
+            base = segment_bases.get(segment)
+            if base is None:
+                continue
+            entries_by_obj.setdefault(current, []).append(MapEntry(
+                va=base + int(hit.group("offset"), 16),
+                symbol=hit.group("symbol"),
+                object_file=current,
+            ))
+    return entries_by_obj
