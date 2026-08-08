@@ -171,8 +171,10 @@ def symbol_patterns_for_function(name: str, toolchain: str = "msvc") -> list[str
     # `_name` C __cdecl.  A source tree compiled as C emits the last three.
     if toolchain == "watcom":
         # Watcom decorates with a trailing underscore for its register calling
-        # convention and both underscores for the stack one.
-        return [f"{base}_", f"_{base}_", f"_{base}"]
+        # convention and both underscores for the stack one.  `__pascal` takes
+        # neither: it upper-cases the name and leaves it otherwise alone, which
+        # is how a routine declared that way disappears from the mapping.
+        return [f"{base}_", f"_{base}_", f"_{base}", base.upper()]
     return [f"?{base}@@", f"@{base}@", f"_{base}@", f"_{base}"]
 
 
