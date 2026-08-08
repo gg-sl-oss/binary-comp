@@ -101,11 +101,21 @@ def map_source_groups(
 
             if hit is None:
                 patterns = symbol_patterns_for_function(group.name, toolchain)
-                for idx, entry in enumerate(obj_entries):
-                    if idx in used:
-                        continue
-                    if symbol_matches(entry.symbol, patterns):
-                        hit = (idx, entry)
+                # The loose match accepts any symbol a pattern is a prefix of,
+                # which is what finds a decorated name, but it also lets a
+                # routine claim the entry of one whose name merely extends it:
+                # `stores_` matches `stores_ctrl_`.  Look for a symbol a
+                # pattern names outright first, and fall back only when the
+                # object has none.
+                for exact_only in (True, False):
+                    for idx, entry in enumerate(obj_entries):
+                        if idx in used:
+                            continue
+                        if (entry.symbol in patterns if exact_only
+                                else symbol_matches(entry.symbol, patterns)):
+                            hit = (idx, entry)
+                            break
+                    if hit is not None:
                         break
             if hit is None:
                 missing.append((source_path, group))
