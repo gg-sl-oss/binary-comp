@@ -41,7 +41,7 @@ DECL_RE = re.compile(
     r"(?P<trailing>[^\n]*)$",
     re.MULTILINE,
 )
-ADDRESS_SUFFIX_RE = re.compile(r"_([0-9A-Fa-f]{6,8})(?:$|_)")
+ADDRESS_SUFFIX_RE = re.compile(r"_([0-9A-Fa-f]{6,8})(?=$|_)")
 COMMENT_ADDRESS_RE = re.compile(r"0x([0-9A-Fa-f]{6,8})")
 ARRAY_DIM_RE = re.compile(r"\[\s*((?:0[xX][0-9A-Fa-f]+)|\d+)\s*\]")
 EMPTY_ARRAY_RE = re.compile(r"\[\s*\]")
@@ -58,8 +58,13 @@ class GlobalDecl:
 
 
 def address_from_name(name: str) -> int | None:
-    match = ADDRESS_SUFFIX_RE.search(name)
-    if not match:
+    # The address is the trailing hexadecimal run, so keep the last candidate.
+    # Names may embed an earlier run of hex digits ("s_cfg_031568_dat_0046bdd0"
+    # holds a filename), and taking the first match would read that instead.
+    match = None
+    for match in ADDRESS_SUFFIX_RE.finditer(name):
+        pass
+    if match is None:
         return None
     return int(match.group(1), 16)
 

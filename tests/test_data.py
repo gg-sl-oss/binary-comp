@@ -546,3 +546,16 @@ def test_find_missing_globals_reports_uncovered_dwords(fixture_root, tmp_path):
     assert summary.known_globals == 3
     assert [candidate.address for candidate in summary.candidates] == [0x40201C]
     assert "0x0040201c" in format_missing_globals(summary)
+
+
+def test_parse_global_declarations_use_trailing_address_run(tmp_path):
+    globals_path = tmp_path / "globals.cpp"
+    globals_path.write_text(
+        'char s_cfg_031568_dat_00402040[15] = "cfg\\\\031568.dat";\n'
+        "int g_Value_ABCDEF_00402050 = 0;\n",
+        encoding="utf-8",
+    )
+
+    globals_list = parse_globals_source(str(globals_path))
+
+    assert [item.address for item in globals_list] == [0x402040, 0x402050]
