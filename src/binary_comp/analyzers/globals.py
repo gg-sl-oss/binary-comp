@@ -205,6 +205,7 @@ class GlobalsAuditSummary:
     total_defs: int
     auto_results: list[tuple[AutoEntry, list[AutoGlobalFact]]]
     auto_reviewed: dict[int, str]
+    layout_reviewed: list[tuple[Issue, str]]
 
     @property
     def unreviewed_auto_complete_count(self) -> int:
@@ -1128,6 +1129,32 @@ def reviewed_auto_complete_map(config: Dict, mode: str) -> Dict[int, str]:
     return {parse_int(key, f"auto_complete_global_effects.reviewed.{mode} key"): str(value) for key, value in mode_reviewed.items()}
 
 
+def reviewed_layout_issue_map(config: Dict, mode: str) -> Dict[Tuple[str, int], str]:
+    globals_config = get_section(config, "globals")
+    reviewed = get_section(globals_config, "reviewed_layout_issues")
+    mode_reviewed = reviewed.get(mode, {})
+    if not isinstance(mode_reviewed, dict):
+        raise ConfigError(f"globals.reviewed_layout_issues.{mode} must be an object")
+    result: Dict[Tuple[str, int], str] = {}
+    for key, note in mode_reviewed.items():
+        if not isinstance(key, str) or ":" not in key:
+            raise ConfigError(
+                f"globals.reviewed_layout_issues.{mode} keys must be CATEGORY:ADDRESS"
+            )
+        category, address_text = key.rsplit(":", 1)
+        category = category.strip().upper().replace("-", "_")
+        if not category:
+            raise ConfigError(
+                f"globals.reviewed_layout_issues.{mode} keys must include a category"
+            )
+        address = parse_int(
+            address_text,
+            f"globals.reviewed_layout_issues.{mode}.{key} address",
+        )
+        result[(category, address)] = str(note)
+    return result
+
+
 def section_ranges_by_name(pe: PEImage, names: Sequence[str]) -> List[Tuple[int, int]]:
     selected = {name.lower() for name in names}
     return [
@@ -1871,7 +1898,10 @@ def array_address_use_is_layout_sensitive(text: str, match, decl: GlobalDecl) ->
         if index is None or decl.size is None or decl.size <= 0:
             return False
         offset = index * elem_size
-        return not (0 <= offset and offset + elem_size <= decl.size)
+        # Taking &array[count] forms the standard one-past-end sentinel.  It
+        # does not access the following declaration and therefore does not
+        # require the two rebuilt globals to remain adjacent.
+        return not (0 <= offset <= decl.size)
     if re.match(r"\s*\)*\s*\[", tail):
         return False
     return constant_offset_crosses_decl(text, match, decl)
@@ -2217,9 +2247,32 @@ def find_original_indexed_global_issues(decls: Sequence[GlobalDecl],
                     if decl is None:
                         continue
                     range_end = decl.address + (decl.size or 0)
+                    # An indexed load whose zero-index element fits inside a
+                    # declared array is normal array use.  Assuming that the
+                    # index can advance by one produces a false positive for
+                    # a load from the array's final element.
+                    if decl.dims and base_address + access_size <= range_end:
+                        continue
                     first_indexed_end = base_address + stride + access_size
                     if first_indexed_end <= range_end:
                         continue
+                    # Optimisers commonly encode array[index - 1] as
+                    # [index + array_base - 1].  When the first indexed
+                    # element lands exactly in the following array, attribute
+                    # the access to that array instead of the scalar whose
+                    # trailing byte supplied the biased displacement.
+                    decl_index = bisect_right(starts, decl.address) - 1
+                    if decl_index + 1 < len(source_ranges):
+                        next_decl = source_ranges[decl_index + 1]
+                        first_indexed_address = base_address + stride
+                        if (
+                            next_decl.address == range_end
+                            and next_decl.dims
+                            and first_indexed_address >= next_decl.address
+                            and first_indexed_address + access_size
+                            <= next_decl.address + (next_decl.size or 0)
+                        ):
+                            continue
                     key = (decl.name, base_address)
                     if key in seen:
                         continue
@@ -2598,6 +2651,7 @@ def format_report(summary: GlobalsAuditSummary) -> str:
     total_defs = summary.total_defs
     auto_results = summary.auto_results
     auto_reviewed = summary.auto_reviewed
+    layout_reviewed = summary.layout_reviewed
     args = summary.inputs
     lines: list[str] = []
 
@@ -2613,6 +2667,8 @@ def format_report(summary: GlobalsAuditSummary) -> str:
     lines.append(f"  definitions:  {total_defs}")
     lines.append(f"  issues:       {len(issues)}")
     lines.append(f"  warnings:     {len(address_warnings)}")
+    if args.check_rebuilt_layout:
+        lines.append(f"  reviewed layout dependencies: {len(layout_reviewed)}")
     if args.min_address or args.max_address is not None or args.issue_kinds:
         max_address = "none" if args.max_address is None else f"0x{args.max_address:08x}"
         issue_kinds = ",".join(sorted(args.issue_kinds)) if args.issue_kinds else "all"
@@ -2627,6 +2683,7 @@ def format_report(summary: GlobalsAuditSummary) -> str:
     if (
         not issues
         and not address_warnings
+        and not layout_reviewed
         and not auto_unreviewed
         and not args.show_auto_complete_reviewed
     ):
@@ -2648,6 +2705,20 @@ def format_report(summary: GlobalsAuditSummary) -> str:
         if max_issues and len(issues) > max_issues:
             lines.append("")
             lines.append(f"... {len(issues) - max_issues} more issues omitted; rerun with --max-issues 0 for all.")
+
+    if layout_reviewed:
+        if issues:
+            lines.append("")
+        lines.append("Reviewed layout dependencies")
+        for issue, review in layout_reviewed:
+            line = f":{issue.line}" if issue.line else ""
+            lines.append(
+                f"{issue.category:31} 0x{issue.address:08x} "
+                f"{issue.name}{line} size={issue.size}"
+            )
+            if issue.detail:
+                lines.append(f"  note:     {issue.detail}")
+            lines.append(f"  review:   {review}")
 
     if address_warnings:
         if issues:
@@ -2785,6 +2856,16 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
         issues = [issue for issue in issues if issue.address <= inputs.max_address]
     if inputs.issue_kinds:
         issues = [issue for issue in issues if issue.category in inputs.issue_kinds]
+    reviewed_layout = reviewed_layout_issue_map(config, target.name)
+    layout_reviewed: list[tuple[Issue, str]] = []
+    unreviewed_issues: list[Issue] = []
+    for issue in issues:
+        review = reviewed_layout.get((issue.category, issue.address))
+        if review is None:
+            unreviewed_issues.append(issue)
+        else:
+            layout_reviewed.append((issue, review))
+    issues = unreviewed_issues
     auto_reviewed = reviewed_auto_complete_map(config, target.name)
     auto_results = build_auto_complete_global_effects(pe, decls, config, target.name, inputs)
     return GlobalsAuditSummary(
@@ -2794,4 +2875,5 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
         total_defs=len(decls),
         auto_results=auto_results,
         auto_reviewed=auto_reviewed,
+        layout_reviewed=layout_reviewed,
     )

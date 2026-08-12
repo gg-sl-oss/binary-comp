@@ -7,7 +7,7 @@ import struct
 from dataclasses import dataclass
 
 from binary_comp.core.mapfile import parse_encoded_address_map
-from binary_comp.core.pe import PEImage
+from binary_comp.core.pe import EXECUTABLE_FLAG, READABLE_FLAG, PEImage
 from binary_comp.source.globals import GlobalDecl, parse_globals_source
 
 
@@ -116,6 +116,66 @@ def build_relocated_ranges(
     return tuple(ranges)
 
 
+def unique_data_match(image: PEImage, needle: bytes) -> int | None:
+    if len(needle) < 16 or not any(needle):
+        return None
+
+    match_address: int | None = None
+    for section in image.sections:
+        if section.flags & EXECUTABLE_FLAG:
+            continue
+        if section.flags and not (section.flags & READABLE_FLAG):
+            continue
+        data = image.read(section.start, section.size)
+        if data is None:
+            continue
+        offset = data.find(needle)
+        while offset >= 0:
+            address = section.start + offset
+            if match_address is not None:
+                return None
+            match_address = address
+            offset = data.find(needle, offset + 1)
+    return match_address
+
+
+def infer_unmapped_data_addresses(
+    original: PEImage,
+    rebuilt: PEImage,
+    globals_list: list[GlobalDecl],
+    address_map: dict[int, int],
+) -> dict[int, int]:
+    """Locate contiguous static-data runs omitted from an MSVC MAP file."""
+    inferred: dict[int, int] = {}
+    index = 0
+    while index < len(globals_list):
+        first = globals_list[index]
+        if first.address in address_map or first.size <= 0:
+            index += 1
+            continue
+
+        end_index = index + 1
+        run_end = first.address + first.size
+        while end_index < len(globals_list):
+            following = globals_list[end_index]
+            if following.address in address_map or following.address != run_end:
+                break
+            run_end += following.size
+            end_index += 1
+
+        original_data = original.read(first.address, run_end - first.address)
+        rebuilt_address = (
+            unique_data_match(rebuilt, original_data)
+            if original_data is not None
+            else None
+        )
+        if rebuilt_address is not None:
+            for item in globals_list[index:end_index]:
+                inferred[item.address] = rebuilt_address + (item.address - first.address)
+        index = end_index
+    return inferred
+
+
 def relocated_pointer_value(
     value: int,
     address_map: dict[int, int],
@@ -130,11 +190,31 @@ def relocated_pointer_value(
     return None
 
 
+def c_string_bytes(image: PEImage, address: int, max_size: int = 4096) -> bytes | None:
+    section = image.section_for_va(address)
+    if section is None or section.flags & EXECUTABLE_FLAG:
+        return None
+    if section.flags and not (section.flags & READABLE_FLAG):
+        return None
+    data = image.read(address, min(max_size, section.end - address))
+    if not data:
+        return None
+    end = data.find(b"\0")
+    if end < 4:
+        return None
+    value = data[:end]
+    if any(byte not in (9, 10, 13) and not 32 <= byte <= 126 for byte in value):
+        return None
+    return value
+
+
 def relocated_pointer_match(
     original_data: bytes,
     rebuilt_data: bytes,
     address_map: dict[int, int],
     relocated_ranges: tuple[RelocatedAddressRange, ...],
+    original_image: PEImage | None = None,
+    rebuilt_image: PEImage | None = None,
 ) -> bool:
     if len(original_data) != len(rebuilt_data):
         return False
@@ -150,6 +230,13 @@ def relocated_pointer_match(
                 saw_relocated_pointer = True
                 offset += 4
                 continue
+            if original_image is not None and rebuilt_image is not None:
+                original_string = c_string_bytes(original_image, original_value)
+                rebuilt_string = c_string_bytes(rebuilt_image, rebuilt_value)
+                if original_string is not None and original_string == rebuilt_string:
+                    saw_relocated_pointer = True
+                    offset += 4
+                    continue
         if original_data[offset] != rebuilt_data[offset]:
             return False
         offset += 1
@@ -169,11 +256,20 @@ def compare_global_data(
     original = PEImage(original_path)
     rebuilt = PEImage(rebuilt_path)
     address_map = parse_encoded_address_map(map_path)
+    globals_list = parse_globals_source(globals_path, extra_type_sizes)
+    inferred_address_map = infer_unmapped_data_addresses(
+        original,
+        rebuilt,
+        globals_list,
+        address_map,
+    )
     pointer_address_map = dict(address_map)
+    pointer_address_map.update(inferred_address_map)
     if relocated_address_map:
         pointer_address_map.update(relocated_address_map)
-    globals_list = parse_globals_source(globals_path, extra_type_sizes)
-    relocated_ranges = build_relocated_ranges(globals_list, address_map)
+    complete_address_map = dict(address_map)
+    complete_address_map.update(inferred_address_map)
+    relocated_ranges = build_relocated_ranges(globals_list, complete_address_map)
 
     comparisons: list[GlobalComparison] = []
     matches = 0
@@ -182,7 +278,7 @@ def compare_global_data(
 
     for global_decl in globals_list:
         original_data = original.read(global_decl.address, global_decl.size)
-        rebuilt_address = address_map.get(global_decl.address)
+        rebuilt_address = complete_address_map.get(global_decl.address)
         if original_data is None:
             rebuilt_data = None
             status = "NOT_FOUND"
@@ -196,15 +292,25 @@ def compare_global_data(
                 status = "MISSING"
                 mismatches += 1
             elif original_data == rebuilt_data:
-                status = "OK"
+                status = (
+                    "OK_SCAN"
+                    if global_decl.address in inferred_address_map
+                    else "OK"
+                )
                 matches += 1
             elif relocated_pointer_match(
                 original_data,
                 rebuilt_data,
                 pointer_address_map,
                 relocated_ranges,
+                original,
+                rebuilt,
             ):
-                status = "OK_PTR"
+                status = (
+                    "OK_SCAN"
+                    if global_decl.address in inferred_address_map
+                    else "OK_PTR"
+                )
                 matches += 1
             else:
                 status = "MISMATCH"

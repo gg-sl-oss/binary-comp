@@ -103,6 +103,78 @@ def test_compare_global_data_reports_mismatch(fixture_root, tmp_path):
     assert "Rebuilt value:  0x00000009 (9)" in format_comparison(summary)
 
 
+def test_compare_global_data_matches_anonymous_string_pointer(tmp_path):
+    from conftest import DATA_VA, write_tiny_pe
+
+    original = tmp_path / "original.exe"
+    rebuilt = tmp_path / "rebuilt.exe"
+    globals_path = tmp_path / "globals.cpp"
+    map_path = tmp_path / "rebuilt.map"
+    write_tiny_pe(
+        original,
+        data_overrides={0: b"same text\0", 0x10: struct.pack("<I", DATA_VA)},
+    )
+    write_tiny_pe(
+        rebuilt,
+        data_overrides={4: b"same text\0", 0x10: struct.pack("<I", DATA_VA + 4)},
+    )
+    globals_path.write_text(
+        'const char *g_Text_00402010 = "same text";\n',
+        encoding="utf-8",
+    )
+    map_path.write_text(
+        " 0003:00000010       _g_Text_00402010 00402010 globals.obj\n",
+        encoding="utf-8",
+    )
+
+    summary = compare_global_data(
+        str(original), str(rebuilt), str(map_path), str(globals_path)
+    )
+
+    assert summary.matches == 1
+    assert summary.mismatches == 0
+    assert summary.comparisons[0].status == "OK_PTR"
+
+
+def test_compare_global_data_finds_unmapped_contiguous_static_data(tmp_path):
+    from conftest import DATA_VA, write_tiny_pe
+
+    original = tmp_path / "original.exe"
+    rebuilt = tmp_path / "rebuilt.exe"
+    globals_path = tmp_path / "globals.cpp"
+    map_path = tmp_path / "rebuilt.map"
+    static_data = bytes.fromhex("78563412f0debc9a4433221188776655")
+    write_tiny_pe(
+        original,
+        data_overrides={0: static_data, 0x1c: struct.pack("<I", DATA_VA)},
+    )
+    write_tiny_pe(
+        rebuilt,
+        data_overrides={0: b"\0" * 4, 4: static_data,
+                        0x1c: struct.pack("<I", DATA_VA + 4)},
+    )
+    globals_path.write_text(
+        "static unsigned int g_DataA_00402000[2] = { 0x12345678, 0x9abcdef0 };\n"
+        "static unsigned int g_DataB_00402008[2] = { 0x11223344, 0x55667788 };\n"
+        "unsigned int *g_DataPointer_0040201c = g_DataA_00402000;\n",
+        encoding="utf-8",
+    )
+    map_path.write_text(
+        " 0003:0000001c       _g_DataPointer_0040201c 0040201c globals.obj\n",
+        encoding="utf-8",
+    )
+
+    summary = compare_global_data(
+        str(original), str(rebuilt), str(map_path), str(globals_path)
+    )
+
+    assert summary.matches == 3
+    assert summary.mismatches == 0
+    assert [item.status for item in summary.comparisons] == [
+        "OK_SCAN", "OK_SCAN", "OK_PTR"
+    ]
+
+
 def test_compare_one_address_uses_map(fixture_root, sample_binaries):
     original, rebuilt = sample_binaries
     comparison = compare_address(
@@ -263,6 +335,75 @@ def test_rebuilt_layout_check_ignores_in_bounds_array_pointer_walk(tmp_path):
     second = AuditGlobalDecl(0x402034, "DAT_00402034", "", 2, "short", [], False, None, 2)
 
     issues = build_rebuilt_layout_issues([first, second], str(map_path), 0, (str(source_dir),))
+
+    assert issues == []
+
+
+def test_rebuilt_layout_check_ignores_one_past_array_address(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(
+        " 0003:00000000       _g_Items_00402000      00406000     <common>\n"
+        " 0003:00000010       _g_Timer_00402010      00406100     <common>\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "activity.cpp").write_text(
+        "extern short g_Items_00402000[8];\n"
+        "void f(short *item) { while (item < &g_Items_00402000[8]) item++; }\n",
+        encoding="utf-8",
+    )
+    items = AuditGlobalDecl(0x402000, "g_Items_00402000", "", 1, "short", ["8"], False, None, 16)
+    timer = AuditGlobalDecl(0x402010, "g_Timer_00402010", "", 2, "int", [], False, None, 4)
+
+    issues = build_rebuilt_layout_issues([items, timer], str(map_path), 0, (str(source_dir),))
+
+    assert issues == []
+
+
+def test_rebuilt_layout_check_ignores_original_array_tail_index(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text("", encoding="utf-8")
+    code_dir = tmp_path / "code-full"
+    code_dir.mkdir()
+    (code_dir / "FUN_00401000.disassembled.txt").write_text(
+        "Function: ReadTail\n"
+        "Address: 0x00401000\n\n"
+        "MOV eax, dword ptr [ebx + 0x40200c]\n",
+        encoding="utf-8",
+    )
+    items = AuditGlobalDecl(0x402000, "g_Items_00402000", "", 1, "int", ["4"], False, None, 16)
+
+    issues = build_rebuilt_layout_issues(
+        [items],
+        str(map_path),
+        0,
+        code_dir=str(code_dir),
+    )
+
+    assert issues == []
+
+
+def test_rebuilt_layout_check_attributes_biased_index_to_following_array(tmp_path):
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text("", encoding="utf-8")
+    code_dir = tmp_path / "code-full"
+    code_dir.mkdir()
+    (code_dir / "FUN_00401000.disassembled.txt").write_text(
+        "Function: ReadText\n"
+        "Address: 0x00401000\n\n"
+        "CMP byte ptr [ecx + 0x402003], 0x2e\n",
+        encoding="utf-8",
+    )
+    pointer = AuditGlobalDecl(0x402000, "g_Text_00402000", "", 1, "char *", [], False, None, 4)
+    buffer = AuditGlobalDecl(0x402004, "g_Buffer_00402004", "", 2, "char", ["16"], False, None, 16)
+
+    issues = build_rebuilt_layout_issues(
+        [pointer, buffer],
+        str(map_path),
+        0,
+        code_dir=str(code_dir),
+    )
 
     assert issues == []
 

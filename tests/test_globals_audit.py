@@ -295,6 +295,72 @@ def test_globals_audit_reports_casted_address_of_adjacent_split(tmp_path):
     ]
 
 
+def test_globals_audit_reports_reviewed_layout_dependency_separately(tmp_path):
+    from conftest import DATA_VA, write_tiny_pe
+
+    original = tmp_path / "original.exe"
+    write_tiny_pe(original, data_overrides={0x10: b"\0\0\0\0"})
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    globals_source = src_dir / "globals.cpp"
+    globals_source.write_text(
+        "short g_PairX_00402010;\n"
+        "short g_PairY_00402012;\n",
+        encoding="utf-8",
+    )
+    (src_dir / "use.cpp").write_text(
+        "int read_pair(void) { return *(unsigned int *)&g_PairX_00402010; }\n",
+        encoding="utf-8",
+    )
+    rebuilt_map = tmp_path / "rebuilt.map"
+    rebuilt_map.write_text(
+        " 0003:00000000       _g_PairX_00402010 00500000     <common>\n"
+        " 0003:00000010       _g_PairY_00402012 00500010     <common>\n",
+        encoding="utf-8",
+    )
+    target = ProjectTarget(
+        name="full",
+        original_exe=str(original),
+        rebuilt_exe=str(original),
+        map_path=str(rebuilt_map),
+        source_dirs=(str(src_dir),),
+        globals_source=str(globals_source),
+    )
+    config = {
+        "globals": {
+            "reviewed_layout_issues": {
+                "full": {
+                    "REBUILT_LAYOUT_ADJACENT_SPLIT:0x00402010":
+                        "The source intentionally loads the packed pair."
+                }
+            }
+        }
+    }
+
+    summary = audit_globals(
+        config,
+        target,
+        GlobalsAuditOptions(
+            min_address=DATA_VA,
+            check_rebuilt_layout=True,
+            no_auto_complete_global_effects=True,
+        ),
+    )
+
+    assert summary.issues == []
+    assert [(issue.category, issue.name, review) for issue, review in summary.layout_reviewed] == [
+        (
+            "REBUILT_LAYOUT_ADJACENT_SPLIT",
+            "g_PairX_00402010",
+            "The source intentionally loads the packed pair.",
+        )
+    ]
+    report = format_report(summary)
+    assert "reviewed layout dependencies: 1" in report
+    assert "Reviewed layout dependencies" in report
+    assert "The source intentionally loads the packed pair." in report
+
+
 def test_globals_audit_reports_rebuilt_asm_access_spanning_source_global(tmp_path):
     from conftest import DATA_VA, write_tiny_pe
 
