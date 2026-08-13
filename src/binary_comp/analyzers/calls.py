@@ -1001,7 +1001,10 @@ def extract_calls_from_compiled(
             calls.append(compiled_reg_map.get(full_target, "__indirect__"))
             continue
 
-        if full_target.startswith("$L") or full_target.startswith("$T"):
+        local_target = re.sub(r"^(?:SHORT|NEAR(?:\s+PTR)?)\s+", "", full_target, flags=re.IGNORECASE)
+        if local_target.startswith("$L") or local_target.startswith("$T"):
+            if is_jump:
+                continue
             calls.append("__label__")
             continue
 

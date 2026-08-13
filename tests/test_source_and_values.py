@@ -601,6 +601,26 @@ _TEXT ENDS
     assert extract_calls_from_compiled(str(asm_path), "Run") == ["indirect[0x94]"]
 
 
+def test_compiled_direct_local_jumps_are_not_calls(tmp_path):
+    asm_path = tmp_path / "local-jumps.asm"
+    asm_path.write_text(
+        """
+_Run PROC NEAR ; Run
+    jmp $L1
+$L1:
+    jmp SHORT $L2
+$L2:
+    call $L3
+$L3:
+    ret 0
+_Run ENDP
+""",
+        encoding="utf-8",
+    )
+
+    assert extract_calls_from_compiled(str(asm_path), "Run") == ["__label__"]
+
+
 def test_source_groups_map_to_rebuilt_symbols(fixture_root):
     groups_by_source = load_source_groups((str(fixture_root / "src"),))
     mapped, missing, entries_by_obj = map_source_groups(groups_by_source, str(fixture_root / "rebuilt.map"))
