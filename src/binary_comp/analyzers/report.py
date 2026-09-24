@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import os
 import re
 from dataclasses import dataclass
@@ -373,7 +374,31 @@ def generate_similarity_report(
     )
 
 
-def format_similarity_report(report: SimilarityReport) -> str:
+def load_similarity_reasons(path: str) -> dict[int, str]:
+    """Load manual review notes keyed by original address, independently of scores."""
+    reasons: dict[int, str] = {}
+    with open(path, newline="", encoding="utf-8-sig") as source:
+        rows = csv.DictReader(source, strict=True)
+        fields = rows.fieldnames or []
+        reason_field = "reason" if "reason" in fields else "evidence_and_likely_cause"
+        if "original_address" not in fields or reason_field not in fields:
+            raise ValueError(f"{path}: expected CSV columns original_address and reason "
+                             "(or evidence_and_likely_cause)")
+        for row in rows:
+            try:
+                address = int(row["original_address"], 16)
+            except (TypeError, ValueError):
+                raise ValueError(f"{path}:{rows.line_num}: invalid original_address") from None
+            if address in reasons:
+                raise ValueError(f"{path}:{rows.line_num}: duplicate address 0x{address:08X}")
+            reasons[address] = " ".join((row[reason_field] or "").split())
+    return reasons
+
+
+def format_similarity_report(
+    report: SimilarityReport,
+    reasons: dict[int, str] | None = None,
+) -> str:
     lines = ["", "--- Similarity Report ---"]
     current_file = None
     for row in report.rows:
@@ -395,4 +420,15 @@ def format_similarity_report(report: SimilarityReport) -> str:
         f"  ASM fallback: {report.asm_fallbacks}",
         f"  Average similarity: {average:.2f}%",
     ])
+    if reasons is not None:
+        lines.extend(["", "--- Recorded reasons for similarity below 90% ---"])
+        below = sorted(
+            (row for row in report.rows if row.similarity is not None and row.similarity < 90.0),
+            key=lambda row: (row.similarity, row.address, row.function_name),
+        )
+        for row in below:
+            reason = reasons.get(row.address) or "Review needed: no reason recorded."
+            lines.append(f"  {row.similarity:6.2f}% {row.function_name}: {reason}")
+        if not below:
+            lines.append("  None in the current report.")
     return "\n".join(lines)

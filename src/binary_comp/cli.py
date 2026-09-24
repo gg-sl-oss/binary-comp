@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sys
 from pathlib import Path
@@ -87,6 +88,7 @@ from binary_comp.analyzers.report import (
     SimilarityReportOptions,
     format_similarity_report,
     generate_similarity_report,
+    load_similarity_reasons,
 )
 from binary_comp.analyzers.values import ValuesOptions, check_values, format_summary, load_policy
 from binary_comp.analyzers.vtables import VtableOptions, check_vtables, format_vtable_summary
@@ -472,6 +474,7 @@ def add_report_parser(subparsers) -> None:
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--target", default="full", help="Target name from config (default: full)")
     parser.add_argument("--filter", dest="file_filter", help="Only include matching source files or function names")
+    parser.add_argument("--reasons", metavar="CSV", help="Append recorded reasons for scores below 90%%")
     parser.add_argument("--no-build", action="store_true", help="Use existing rebuilt binary and map")
     parser.set_defaults(handler=run_report)
 
@@ -1128,6 +1131,7 @@ def run_exe(args) -> int:
 
 def run_report(args) -> int:
     try:
+        reasons = load_similarity_reasons(args.reasons) if args.reasons is not None else None
         config, target = load_project_target(args.config, args.target)
         options = SimilarityReportOptions(
             build=not args.no_build,
@@ -1141,11 +1145,11 @@ def run_report(args) -> int:
             report = generate_tpu_similarity_report(config, args.config, target, options)
         else:
             report = generate_similarity_report(target, options)
-    except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as exc:
+    except (ConfigError, OSError, RuntimeError, ValueError, csv.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(format_similarity_report(report))
+    print(format_similarity_report(report, reasons=reasons))
     return 0
 
 

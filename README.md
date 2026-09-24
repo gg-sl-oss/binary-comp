@@ -277,6 +277,7 @@ binary-comp globals --config path/to/binary-comp.json --target full \
 binary-comp calls --config path/to/binary-comp.json --target full --fail-on-mismatches
 binary-comp global-access --config path/to/binary-comp.json --target full --include-address-immediates
 binary-comp report --config path/to/binary-comp.json --target full
+binary-comp report --config path/to/binary-comp.json --target full --reasons reasons.csv
 binary-comp order --config path/to/binary-comp.json --target full --no-build
 binary-comp vtables --config path/to/binary-comp.json --target full --dump
 binary-comp seh --config path/to/binary-comp.json --target full --report
@@ -301,6 +302,23 @@ the linker relocated those globals independently in the rebuilt image.
 
 Most analyzers that read rebuilt code will run the configured build command
 first unless `--no-build` is supplied.
+
+`report --reasons FILE.csv` appends a short list of functions whose current
+similarity is below 90%, sorted by score. The CSV uses hexadecimal original
+addresses to associate manual review notes with functions:
+
+```csv
+original_address,reason
+0x00401000,"Register allocation and stack spills differ."
+```
+
+The `evidence_and_likely_cause` column is also accepted in place of `reason`;
+additional review columns are ignored. Scores and function selection always
+come from the current report, including `--filter`, and use the unrounded
+similarity. Missing or empty notes show `Review needed: no reason recorded.`
+Excluded functions remain excluded. Without `--reasons`, output is unchanged.
+The CSV path is relative to the current working directory, and notes should be
+updated manually when code changes.
 
 ### Compilation-unit order and boundary hints
 
