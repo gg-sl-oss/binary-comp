@@ -1,11 +1,4 @@
-"""Small OMF DOS object parsing and comparison helpers.
-
-The comparison command remains focused on 16-bit Borland-style LEDATA records.
-The image API additionally reads fragmented 16/32-bit LEDATA, PUBDEF32, and
-FIXUPP32 records so 32-bit DOS reconstruction adapters can resolve public
-symbols and mask linker-written operands without carrying a project-local OMF
-parser.
-"""
+"""16/32-bit OMF object parsing and relocation-masked comparison helpers."""
 
 from __future__ import annotations
 
@@ -21,7 +14,7 @@ from binary_comp.analyzers.function_compare import (
 )
 from binary_comp.analyzers.report import SimilarityReport, SimilarityReportOptions, SimilarityReportRow
 from binary_comp.config import ProjectTarget
-from binary_comp.core.disasm import disassemble_raw_16
+from binary_comp.core.disasm import disassemble_raw
 
 
 OMF_LEDATA = 0xA0
@@ -86,6 +79,8 @@ class OmfComparison:
     rebuilt: bytes
     mask: bytes
     fixups: tuple[OmfFixup, ...]
+    fixup_layout_matches: bool | None = None
+    literal_matches: tuple[bool, ...] = ()
 
     @property
     def compared_size(self) -> int:
@@ -105,7 +100,21 @@ class OmfComparison:
 
     @property
     def matches(self) -> bool:
-        return not self.mismatches
+        return (
+            bool(self.rebuilt)
+            and len(self.original) == len(self.rebuilt)
+            and not self.mismatches
+            and self.fixup_layout_matches is not False
+            and all(self.literal_matches)
+        )
+
+
+@dataclass(frozen=True)
+class OmfLiteralSpec:
+    original_offset: int
+    segment_index: int
+    object_offset: int
+    size: int
 
 
 @dataclass(frozen=True)
@@ -122,6 +131,11 @@ class OmfCompareSpec:
     source_path: str | None = None
     target: str | None = None
     compiler_flags: str | None = None
+    bits: int = 16
+    symbol: str | None = None
+    original_address: int | None = None
+    expected_fixups: tuple[tuple[int, int], ...] | None = None
+    literals: tuple[OmfLiteralSpec, ...] = ()
 
 
 def read_index(data: bytes, offset: int) -> tuple[int, int]:
@@ -441,21 +455,72 @@ def compare_omf_to_original(
     segment_index: int | None = None,
     ledata_index: int = 0,
     name: str = "omf-function",
+    bits: int = 16,
+    symbol: str | None = None,
+    expected_fixups: tuple[tuple[int, int], ...] | None = None,
+    literals: tuple[OmfLiteralSpec, ...] = (),
 ) -> OmfComparison:
-    ledata_records, fixups = load_omf_object(object_path)
-    ledata = select_ledata(ledata_records, segment_index=segment_index, ledata_index=ledata_index)
-    if object_offset < 0 or object_offset > len(ledata.data):
-        raise OmfCompareError("object_offset outside LEDATA")
-    rebuilt = ledata.data[object_offset:]
-    if size is not None:
-        if size < 0:
-            raise OmfCompareError("size must be non-negative")
+    if bits not in (16, 32):
+        raise OmfCompareError("bits must be 16 or 32")
+    if size is not None and size <= 0:
+        raise OmfCompareError("size must be positive")
+    image = None
+    if bits == 32 or symbol is not None:
+        if ledata_index:
+            raise OmfCompareError("LEDATA index is not used with segment images")
+        image = load_omf_image(object_path)
+        if symbol is not None:
+            if symbol not in image.publics:
+                raise OmfCompareError(f"OMF public symbol not found: {symbol}")
+            selected_segment, start = image.publics[symbol]
+            if object_offset or segment_index not in (None, selected_segment):
+                raise OmfCompareError("symbol cannot be combined with a different object window")
+            segment_index, object_offset = selected_segment, start
+        elif segment_index is None:
+            segment_index = next(iter(image.segments))
+        if segment_index not in image.segments:
+            raise OmfCompareError(f"OMF segment not found: {segment_index}")
+        data = image.segments[segment_index]
+        end = min(
+            [offset for segment, offset in image.publics.values()
+             if symbol is not None and segment == segment_index and offset > object_offset]
+            + [len(data)]
+        )
+        fixups = tuple(OmfFixup(f.offset, f.length, f.location_type)
+                       for f in image.fixups if f.segment_index == segment_index)
+    else:
+        ledata_records, fixups = load_omf_object(object_path)
+        ledata = select_ledata(ledata_records, segment_index=segment_index, ledata_index=ledata_index)
+        data, end = ledata.data, len(ledata.data)
+    if object_offset < 0 or object_offset >= end:
+        raise OmfCompareError("object_offset outside emitted object bytes")
+    rebuilt = data[object_offset:end]
+    # A public symbol selects its whole body. The expected original size must
+    # never truncate a larger rebuilt function or silently accept a shorter one.
+    if size is not None and symbol is None:
         rebuilt = rebuilt[:size]
     original_data = Path(original_path).read_bytes()
-    if original_offset < 0 or original_offset + len(rebuilt) > len(original_data):
+    original_size = size if size is not None else len(rebuilt)
+    if original_offset < 0 or original_offset + original_size > len(original_data):
         raise OmfCompareError("original byte window outside file")
-    original = original_data[original_offset:original_offset + len(rebuilt)]
+    original = original_data[original_offset:original_offset + original_size]
     mask = build_mask(len(rebuilt), fixups, object_offset=object_offset)
+    actual_fixups = sorted((f.offset - object_offset, f.length) for f in fixups
+                           if f.offset < object_offset + len(rebuilt)
+                           and f.offset + f.length > object_offset)
+    layout_matches = None if expected_fixups is None else actual_fixups == sorted(expected_fixups)
+    literal_matches = []
+    if literals and image is None:
+        image = load_omf_image(object_path)
+    for literal in literals:
+        if min(literal.original_offset, literal.object_offset) < 0 or literal.size <= 0:
+            raise OmfCompareError("literal offsets must be non-negative and size positive")
+        if literal.original_offset + literal.size > len(original_data):
+            raise OmfCompareError("original literal window outside file")
+        expected = original_data[literal.original_offset:literal.original_offset + literal.size]
+        actual = image.segments.get(literal.segment_index, b"")[
+            literal.object_offset:literal.object_offset + literal.size]
+        literal_matches.append(actual == expected)
     return OmfComparison(
         name=name,
         original_path=str(original_path),
@@ -467,11 +532,13 @@ def compare_omf_to_original(
         rebuilt=rebuilt,
         mask=mask,
         fixups=fixups,
+        fixup_layout_matches=layout_matches,
+        literal_matches=tuple(literal_matches),
     )
 
 
-def compare_omf_spec(spec: OmfCompareSpec) -> FunctionComparison:
-    byte_comparison = compare_omf_to_original(
+def compare_omf_spec_bytes(spec: OmfCompareSpec) -> OmfComparison:
+    return compare_omf_to_original(
         original_path=spec.original_path,
         original_offset=spec.original_offset,
         object_path=spec.object_path,
@@ -480,13 +547,22 @@ def compare_omf_spec(spec: OmfCompareSpec) -> FunctionComparison:
         segment_index=spec.segment_index,
         ledata_index=spec.ledata_index,
         name=spec.name,
+        bits=spec.bits,
+        symbol=spec.symbol,
+        expected_fixups=spec.expected_fixups,
+        literals=spec.literals,
     )
+
+
+def compare_omf_spec(spec: OmfCompareSpec) -> FunctionComparison:
+    byte_comparison = compare_omf_spec_bytes(spec)
+    address = spec.original_address if spec.original_address is not None else spec.original_offset
     original = DisassemblyResult(
-        disassemble_raw_16(byte_comparison.original, byte_comparison.original_offset),
+        disassemble_raw(byte_comparison.original, address, bits=spec.bits),
         [],
     )
     rebuilt = DisassemblyResult(
-        disassemble_raw_16(byte_comparison.rebuilt, byte_comparison.object_offset),
+        disassemble_raw(byte_comparison.rebuilt, byte_comparison.object_offset, bits=spec.bits),
         [],
     )
     if not original.instructions:
@@ -499,8 +575,8 @@ def compare_omf_spec(spec: OmfCompareSpec) -> FunctionComparison:
     )
     return FunctionComparison(
         function_name=spec.function_name,
-        original_addr=spec.original_offset,
-        rebuilt_addr=spec.object_offset,
+        original_addr=address,
+        rebuilt_addr=byte_comparison.object_offset,
         similarity=similarity,
         rebuilt=rebuilt,
         original=original,
@@ -567,6 +643,29 @@ def load_omf_specs(config: dict[str, Any], config_path: str | Path, target_name:
         original = require_config_string(item, "original", f"{label}.original")
         object_path = require_config_string(item, "object", f"{label}.object")
         function_name = optional_config_string(item, "function") or name
+        target_kind = config.get("targets", {}).get(item_target or target_name, {}).get("kind")
+        bits = parse_config_int(item.get("bits", 32 if target_kind == "dos32-omf" else 16), f"{label}.bits")
+        if bits not in (16, 32):
+            raise OmfCompareError(f"{label}.bits must be 16 or 32")
+        expected_fixups = None
+        if "expected_fixups" in item:
+            raw_fixups = item["expected_fixups"]
+            if not isinstance(raw_fixups, list) or not all(isinstance(f, dict) for f in raw_fixups):
+                raise OmfCompareError(f"{label}.expected_fixups must be a list of objects")
+            expected_fixups = tuple(
+                (parse_config_int(f.get("offset"), f"{label}.expected_fixups.offset"),
+                 parse_config_int(f.get("size"), f"{label}.expected_fixups.size"))
+                for f in raw_fixups
+            )
+            if any(offset < 0 or size <= 0 for offset, size in expected_fixups):
+                raise OmfCompareError(f"{label}.expected_fixups has an invalid range")
+        raw_literals = item.get("literals", [])
+        if not isinstance(raw_literals, list) or not all(isinstance(f, dict) for f in raw_literals):
+            raise OmfCompareError(f"{label}.literals must be a list of objects")
+        literals = tuple(OmfLiteralSpec(**{
+            key: parse_config_int(literal.get(key), f"{label}.literals.{key}")
+            for key in ("original_offset", "segment_index", "object_offset", "size")
+        }) for literal in raw_literals)
         specs.append(OmfCompareSpec(
             name=name,
             function_name=function_name,
@@ -580,6 +679,11 @@ def load_omf_specs(config: dict[str, Any], config_path: str | Path, target_name:
             source_path=resolve_config_path(config_path, optional_config_string(item, "source")),
             target=item_target,
             compiler_flags=optional_config_string(item, "compiler_flags"),
+            bits=bits,
+            symbol=optional_config_string(item, "symbol"),
+            original_address=parse_config_int(item.get("original_address"), f"{label}.original_address", required=False),
+            expected_fixups=expected_fixups,
+            literals=literals,
         ))
     return tuple(specs)
 
@@ -657,7 +761,7 @@ def generate_omf_similarity_report(
         rows.append(SimilarityReportRow(
             source_file,
             spec.function_name,
-            spec.original_offset,
+            comparison.original_addr,
             similarity,
             f"{similarity:.2f}%",
         ))
@@ -682,6 +786,12 @@ def format_omf_comparison(comparison: OmfComparison, context: int = 8) -> str:
         f"  object:   {comparison.object_path} LEDATA+0x{comparison.object_offset:x}",
         f"  size:     {comparison.compared_size} byte(s), masked fixup byte(s): {comparison.masked_count}",
     ]
+    if len(comparison.original) != len(comparison.rebuilt):
+        lines.append(f"  length:   MISMATCH ({len(comparison.original)} original / {len(comparison.rebuilt)} rebuilt)")
+    if comparison.fixup_layout_matches is not None:
+        lines.append(f"  fixups:   {'MATCH' if comparison.fixup_layout_matches else 'MISMATCH'} (reviewed layout)")
+    for index, matches in enumerate(comparison.literal_matches):
+        lines.append(f"  literal {index + 1}: {'MATCH' if matches else 'MISMATCH'}")
     if comparison.matches:
         lines.append("  result:   MATCH")
         return "\n".join(lines)

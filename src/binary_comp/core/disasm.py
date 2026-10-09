@@ -64,13 +64,20 @@ def require_capstone_16():
 
 
 def disassemble_raw_16(data: bytes, start: int = 0) -> list[Instruction]:
-    """Disassemble a raw 16-bit code window starting at ``start``.
+    """Disassemble a raw 16-bit code window starting at ``start``."""
+    return disassemble_raw(data, start, bits=16)
+
+
+def disassemble_raw(data: bytes, start: int = 0, *, bits: int = 32) -> list[Instruction]:
+    """Disassemble a raw 16/32-bit code window without an executable wrapper.
 
     The address only labels instructions for display and similarity output; it
     does not have to be a real load address.
     """
     Cs16, CS_ARCH_X86, CS_MODE_16 = require_capstone_16()
-    md = Cs16(CS_ARCH_X86, CS_MODE_16)
+    if bits not in (16, 32):
+        raise ValueError("bits must be 16 or 32")
+    md = Cs16(CS_ARCH_X86, CS_MODE_16 if bits == 16 else CS_MODE_32)
     instructions: list[Instruction] = []
     for insn in md.disasm(data, start):
         mnemonic = normalize_mnemonic(insn.mnemonic)

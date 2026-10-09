@@ -191,7 +191,7 @@ def _target_from_standalone(config: dict[str, Any], target: str, base: Path) -> 
         target_cfg.get("source_excludes") or target_cfg.get("source_exclude"),
         f"targets.{target}.source_excludes",
     )
-    if kind in ("dos16-omf", "dos16-tpu"):
+    if kind in ("dos16-omf", "dos32-omf", "dos16-tpu"):
         rebuilt_exe = _resolve_standalone_path(optional_string(target_cfg, "rebuilt_exe"), base) or ""
         map_path = _resolve_standalone_path(optional_string(target_cfg, "map"), base) or ""
     else:

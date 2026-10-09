@@ -351,13 +351,53 @@ are kept together. No row proves a translation-unit boundary: test a candidate
 with controlled split/join builds and retain it only if the whole-project report
 and semantic verifiers do not regress.
 
-`binary-comp omf-compare` is for 16-bit DOS reconstruction work where the
-rebuilt artifact is an OMF `.OBJ` instead of a linked executable. It compares
-raw original bytes against a selected OMF `LEDATA` range and masks `FIXUPP`
-relocation operands, which is useful for early Borland C/C++ matching before
-the RTLink/link step is modeled.
+`binary-comp omf-compare` compares 16/32-bit DOS OMF `.OBJ` files before linking,
+masking `FIXUPP` operands. The default 16-bit mode selects a `LEDATA` range.
+Use `--bits 32` for a segment image, and `--symbol` to select a whole public
+function (ending at the next public symbol in the same segment or segment end):
 
-The reusable OMF image API also supports 32-bit DOS adapters. `load_omf_image`
+```sh
+binary-comp omf-compare --bits 32 --original original.exe --original-offset 0x200 \
+  --object sample.obj --symbol CheckSlot_ --size 0x20
+```
+
+With a symbol, `--size` is the expected original length: it never truncates the
+rebuilt function. A shorter or longer body fails. This remains an object-level,
+relocation-masked match; it does not verify final linker placement.
+
+Both `dos16-omf` and `dos32-omf` targets use `omf_compare.functions`. The target
+kind supplies the default decoding mode; an entry can override it with `bits`.
+An optional `original_address` labels disassembly while `original_offset`
+selects bytes in the original file. `expected_fixups` checks the reviewed
+function-relative relocation ranges, and `literals` checks associated data:
+
+```json
+{
+  "targets": {
+    "sample": {
+      "kind": "dos32-omf", "original_exe": "../original.exe",
+      "source_dirs": ["../src"], "build": {"build": "make build"}
+    }
+  },
+  "omf_compare": {"functions": [{
+    "target": "sample", "name": "CheckSlot", "symbol": "CheckSlot_",
+    "original": "../original.exe", "original_offset": "0x200",
+    "original_address": "0x10200", "object": "../build/sample.obj", "size": "0x20",
+    "expected_fixups": [{"offset": "0x10", "size": 4}],
+    "literals": [{"original_offset": "0x800", "segment_index": 2, "object_offset": 0, "size": 14}]
+  }]}
+}
+```
+
+`compare --config ... --target sample CheckSlot` prints side-by-side assembly;
+`report` prints mnemonic similarity. For a strict byte gate use
+`omf-compare --config ... --target sample`, optionally `--function CheckSlot`.
+It checks all selected entries and returns nonzero on byte/length, fixup-layout,
+or literal differences. Config commands build by default; use `--no-build`
+when Make has already built the objects. Mnemonic similarity alone can remain
+100% when constants differ; it is not a substitute for the strict gate.
+
+The reusable OMF image API backs these commands. `load_omf_image`
 assembles fragmented `LEDATA`/`LEDATA32` records into per-segment byte images,
 indexes 16/32-bit `PUBDEF` and `LPUBDEF` symbols, and projects deterministic
 `FIXUPP`/`FIXUPP32` patch locations into those images. `build_segment_mask`

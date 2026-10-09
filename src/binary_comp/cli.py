@@ -47,9 +47,11 @@ from binary_comp.analyzers.globals import GlobalsAuditOptions, audit_globals, fo
 from binary_comp.analyzers.omf import (
     OmfCompareError,
     compare_omf_config_function,
+    compare_omf_spec_bytes,
     compare_omf_to_original,
     format_omf_comparison,
     generate_omf_similarity_report,
+    load_omf_specs,
 )
 from binary_comp.analyzers.triage import (
     TriageOptions,
@@ -217,7 +219,7 @@ def add_compare_parser(subparsers) -> None:
     parser.add_argument(
         "disassembled_code",
         nargs="?",
-        help="Path to the Ghidra-style disassembly export for the function; omitted for dos16-omf/dos16-tpu targets",
+        help="Path to the Ghidra-style disassembly export; omitted for OMF/TPU targets",
     )
     parser.add_argument("--no-build", action="store_true", help="Use existing rebuilt binary and map")
     parser.set_defaults(handler=run_compare)
@@ -226,14 +228,20 @@ def add_compare_parser(subparsers) -> None:
 def add_omf_compare_parser(subparsers) -> None:
     parser = subparsers.add_parser(
         "omf-compare",
-        help="Compare raw original bytes against a 16-bit OMF LEDATA record, masking FIXUPP operands",
+        help="Compare original bytes against 16/32-bit OMF objects, masking FIXUPP operands",
     )
-    parser.add_argument("--original", required=True, help="Original raw binary/overlay image")
-    parser.add_argument("--original-offset", required=True, type=lambda value: int(value, 0),
+    parser.add_argument("--config", help="Project config containing omf_compare.functions")
+    parser.add_argument("--target", default="full", help="Target name from config")
+    parser.add_argument("--function", help="Select one function from config (default: all)")
+    parser.add_argument("--no-build", action="store_true", help="Use existing objects with --config")
+    parser.add_argument("--bits", type=int, choices=(16, 32), default=16, help="Raw comparison mode (default: 16)")
+    parser.add_argument("--symbol", help="Select the whole body of this OMF public symbol")
+    parser.add_argument("--original", help="Original raw binary/overlay image")
+    parser.add_argument("--original-offset", type=lambda value: int(value, 0),
                         help="Offset in original file/image")
-    parser.add_argument("--object", required=True, dest="object_path", help="Borland/TASM OMF object file")
+    parser.add_argument("--object", dest="object_path", help="OMF object file")
     parser.add_argument("--size", type=lambda value: int(value, 0),
-                        help="Byte count to compare; defaults to remaining selected LEDATA")
+                        help="Original byte count; with --symbol, rebuilt body is never truncated")
     parser.add_argument("--object-offset", type=lambda value: int(value, 0), default=0,
                         help="Offset within selected LEDATA (default: 0)")
     parser.add_argument("--segment-index", type=lambda value: int(value, 0),
@@ -837,7 +845,7 @@ def run_data(args) -> int:
 def run_compare(args) -> int:
     try:
         config, target = load_project_target(args.config, args.target)
-        if target.kind == "dos16-omf":
+        if target.kind in ("dos16-omf", "dos32-omf"):
             maybe_build(target, not args.no_build)
             comparison = compare_omf_config_function(
                 config,
@@ -897,6 +905,24 @@ def run_omf_compare(args) -> int:
         print("error: --max-differences must be non-negative", file=sys.stderr)
         return 2
     try:
+        if args.config:
+            config, target = load_project_target(args.config, args.target)
+            if target.kind not in ("dos16-omf", "dos32-omf"):
+                raise OmfCompareError("omf-compare requires an OMF target")
+            specs = load_omf_specs(config, args.config, target.name)
+            if args.function:
+                specs = tuple(s for s in specs if args.function in (s.name, s.function_name))
+            if not specs:
+                raise OmfCompareError("no matching OMF comparison entries")
+            maybe_build(target, not args.no_build)
+            matches = True
+            for spec in specs:
+                comparison = compare_omf_spec_bytes(spec)
+                print(format_omf_comparison(comparison, context=args.max_differences))
+                matches = matches and comparison.matches
+            return 0 if matches else 1
+        if args.original is None or args.original_offset is None or args.object_path is None:
+            raise OmfCompareError("provide --config or --original, --original-offset and --object")
         comparison = compare_omf_to_original(
             original_path=args.original,
             original_offset=args.original_offset,
@@ -906,8 +932,10 @@ def run_omf_compare(args) -> int:
             segment_index=args.segment_index,
             ledata_index=args.ledata_index,
             name=args.name,
+            bits=args.bits,
+            symbol=args.symbol,
         )
-    except (FileNotFoundError, OSError, OmfCompareError) as exc:
+    except (ConfigError, OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -1139,7 +1167,7 @@ def run_report(args) -> int:
             file_filter=args.file_filter,
             signature_overloads=extract_signature_overloads(config),
         )
-        if target.kind == "dos16-omf":
+        if target.kind in ("dos16-omf", "dos32-omf"):
             report = generate_omf_similarity_report(config, args.config, target, options)
         elif target.kind == "dos16-tpu":
             report = generate_tpu_similarity_report(config, args.config, target, options)
