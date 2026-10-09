@@ -246,6 +246,15 @@ The rebuilt MAP file provides the rebuilt VA for each encoded-address symbol,
 allowing `binary-comp data` to compare original bytes against relocated rebuilt
 bytes.
 
+`globals` and linked `data` comparison also support DOS LE/LX images, including
+bound MZ/BW executables. Set `globals_source` to a C/C++ file or directory and
+provide `globals.type_sizes` for typedefs and packed structures. Watcom MAP
+symbols are matched to source names and address comments. LE comparisons read
+zero-filled storage and resolve internal 32-bit fixups at preferred object bases;
+unsupported pages or fixups are errors. `globals.function_addresses` can supply
+original addresses for external function-pointer initializers. The `data`
+`--address` and `--find-missing` modes remain PE-only.
+
 ### Optional Inputs By Analyzer
 
 | Analyzer | Required target fields | Extra notes |

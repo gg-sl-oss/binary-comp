@@ -94,7 +94,7 @@ from binary_comp.analyzers.report import (
 )
 from binary_comp.analyzers.values import ValuesOptions, check_values, format_summary, load_policy
 from binary_comp.analyzers.vtables import VtableOptions, check_vtables, format_vtable_summary
-from binary_comp.config import ConfigError, DEFAULT_CONFIG_PATH, ProjectTarget, load_project_target
+from binary_comp.config import ConfigError, DEFAULT_CONFIG_PATH, ProjectTarget, load_project_target, parse_int
 from binary_comp.source.functions import load_source_groups, map_source_groups
 from binary_comp.core.binary import (
     analyze_word_delta,
@@ -192,7 +192,7 @@ def add_vtables_parser(subparsers) -> None:
 
 
 def add_data_parser(subparsers) -> None:
-    parser = subparsers.add_parser("data", help="Compare global data between original and rebuilt PE files")
+    parser = subparsers.add_parser("data", help="Compare global data between original and rebuilt PE/LE images")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--target", default="full", help="Target name from config (default: full)")
     parser.add_argument("--globals-source", help="Global declarations source override")
@@ -554,7 +554,7 @@ def add_triage_parser(subparsers) -> None:
 
 
 def add_globals_parser(subparsers) -> None:
-    parser = subparsers.add_parser("globals", help="Audit global declarations against original PE data")
+    parser = subparsers.add_parser("globals", help="Audit global declarations against original PE/LE data")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Project config path (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--target", default="full", help="Target name from config (default: full)")
     parser.add_argument("--globals-source", "--globals-c", dest="globals_source", help="Global definitions source override")
@@ -782,7 +782,32 @@ def parse_skip_ranges(values: list[str]) -> tuple[tuple[int, int], ...]:
     return tuple(ranges)
 
 
-def build_source_function_address_map(target: ProjectTarget) -> dict[int, int]:
+def build_source_function_address_map(target: ProjectTarget, function_addresses: dict | None = None) -> dict[int, int]:
+    if target.kind in ("dos32-omf", "le"):
+        from binary_comp.core.le import LEImage
+        from binary_comp.core.mapfile import parse_watcom_map_symbols
+        from binary_comp.source.cpp import parse_source_functions
+        image = LEImage(target.rebuilt_exe)
+        symbols: dict[str, set[int]] = {}
+        for entry in parse_watcom_map_symbols(target.map_path, image.segment_bases()):
+            symbols.setdefault(entry.symbol, set()).add(entry.va)
+        mapping: dict[int, int] = {}
+        for directory in target.source_dirs:
+            for root, _dirs, files in os.walk(directory):
+                for filename in files:
+                    if not filename.lower().endswith((".c", ".cc", ".cpp", ".cxx")):
+                        continue
+                    for function in parse_source_functions(os.path.join(root, filename)):
+                        names = (function.name, function.name + "_", "_" + function.name, function.name.upper())
+                        matches = set().union(*(symbols.get(name, set()) for name in names))
+                        if len(matches) == 1:
+                            mapping[int(function.address, 16)] = next(iter(matches))
+        for name, address in (function_addresses or {}).items():
+            names = (name, name + "_", "_" + name, name.upper())
+            matches = set().union(*(symbols.get(symbol, set()) for symbol in names))
+            if len(matches) == 1:
+                mapping[parse_int(address, f"globals.function_addresses.{name}")] = next(iter(matches))
+        return mapping
     groups_by_source = load_source_groups(
         target.source_dirs,
         target.map_skip,
@@ -832,14 +857,15 @@ def run_data(args) -> int:
             globals_source,
             DataOptions(section_name=args.section, verbose=args.verbose),
             extra_type_sizes=extra_type_sizes,
-            relocated_address_map=build_source_function_address_map(target),
+            relocated_address_map=build_source_function_address_map(
+                target, config.get("globals", {}).get("function_addresses", {})),
         )
     except (ConfigError, FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     print(format_comparison(summary, verbose=args.verbose))
-    return 0 if summary.mismatches == 0 else 1
+    return 0 if summary.mismatches == 0 and summary.missing_symbols == 0 else 1
 
 
 def run_compare(args) -> int:

@@ -149,6 +149,28 @@ WATCOM_SYMBOL_RE = re.compile(
     r"^(?P<segment>[0-9a-fA-F]{4}):(?P<offset>[0-9a-fA-F]{8})[*+]?\s+(?P<symbol>\S+)")
 
 
+def parse_watcom_map_symbols(map_path: str, segment_bases: dict[int, int]) -> list[MapSymbol]:
+    """Read code and data symbols using the linked image's object bases."""
+    if not os.path.isfile(map_path):
+        return []
+    symbols: list[MapSymbol] = []
+    current = None
+    with open(map_path, encoding="latin1") as handle:
+        for line in handle:
+            module = WATCOM_MODULE_RE.match(line.strip())
+            if module:
+                current = module.group(1).split("(")[0].replace("\\", "/")
+                continue
+            hit = WATCOM_SYMBOL_RE.match(line.strip())
+            if current is None or hit is None:
+                continue
+            segment = int(hit.group("segment"), 16)
+            if segment in segment_bases:
+                symbols.append(MapSymbol(segment, segment_bases[segment] + int(hit.group("offset"), 16),
+                                         hit.group("symbol"), segment == 1, current))
+    return symbols
+
+
 def parse_watcom_map_by_obj(
     map_path: str,
     segment_bases: dict[int, int],

@@ -1,4 +1,4 @@
-"""Compare global data between original and rebuilt PE images."""
+"""Compare global data between original and rebuilt executable images."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 from binary_comp.core.mapfile import parse_encoded_address_map
 from binary_comp.core.pe import EXECUTABLE_FLAG, READABLE_FLAG, PEImage
+from binary_comp.core.image import load_image
+from binary_comp.core.le import LEImage
 from binary_comp.source.globals import GlobalDecl, parse_globals_source
 
 
@@ -253,10 +255,34 @@ def compare_global_data(
     relocated_address_map: dict[int, int] | None = None,
 ) -> DataCompareSummary:
     options = options or DataOptions()
-    original = PEImage(original_path)
-    rebuilt = PEImage(rebuilt_path)
+    original = load_image(original_path, relocate=True)
+    rebuilt = load_image(rebuilt_path, relocate=True)
     address_map = parse_encoded_address_map(map_path)
-    globals_list = parse_globals_source(globals_path, extra_type_sizes)
+    if isinstance(original, LEImage) or os.path.isdir(globals_path):
+        from binary_comp.analyzers.globals import (
+            configure_globals, infer_size, parse_globals_source as parse_declarations,
+            rebuilt_symbol_indexes, rebuilt_va_for_decl,
+        )
+        configure_globals({"type_sizes": extra_type_sizes or {}})
+        declarations = parse_declarations(globals_path)
+        globals_list = []
+        for decl in declarations:
+            size = infer_size(decl, {"NULL": 0}, None)
+            if size is None or size <= 0:
+                raise ValueError(f"unknown size of global {decl.name}; configure globals.type_sizes")
+            globals_list.append(GlobalDecl(decl.address, size, decl.name, decl.type_text,
+                                           "initialized" if decl.has_initializer else "implicit zero"))
+        exact, by_address = rebuilt_symbol_indexes(
+            map_path, declarations, rebuilt.segment_bases() if isinstance(rebuilt, LEImage) else None)
+        for decl in declarations:
+            va = rebuilt_va_for_decl(decl, exact, by_address)
+            if va is not None:
+                address_map[decl.address] = va
+        globals_list.sort(key=lambda decl: decl.address)
+    else:
+        globals_list = parse_globals_source(globals_path, extra_type_sizes)
+    if not globals_list:
+        raise ValueError(f"no addressed global definitions found in {globals_path}")
     inferred_address_map = infer_unmapped_data_addresses(
         original,
         rebuilt,
@@ -282,6 +308,7 @@ def compare_global_data(
         if original_data is None:
             rebuilt_data = None
             status = "NOT_FOUND"
+            mismatches += 1
         elif rebuilt_address is None:
             rebuilt_data = None
             status = "NO_SYMBOL"
@@ -291,6 +318,14 @@ def compare_global_data(
             if rebuilt_data is None:
                 status = "MISSING"
                 mismatches += 1
+            elif isinstance(original, LEImage) and isinstance(rebuilt, LEImage):
+                if relocated_le_data_match(original, rebuilt, global_decl.address, rebuilt_address,
+                                           original_data, rebuilt_data, pointer_address_map, relocated_ranges):
+                    status = "OK" if original_data == rebuilt_data else "OK_PTR"
+                    matches += 1
+                else:
+                    status = "MISMATCH"
+                    mismatches += 1
             elif original_data == rebuilt_data:
                 status = (
                     "OK_SCAN"
@@ -336,6 +371,32 @@ def compare_global_data(
         missing_symbols=missing_symbols,
         comparisons=tuple(comparisons),
     )
+
+
+def relocated_le_data_match(original: LEImage, rebuilt: LEImage,
+                            original_address: int, rebuilt_address: int,
+                            original_data: bytes, rebuilt_data: bytes,
+                            address_map: dict[int, int],
+                            ranges: tuple[RelocatedAddressRange, ...]) -> bool:
+    """Compare only loader-identified pointers, preserving every other byte."""
+    size = len(original_data)
+    if size != len(rebuilt_data):
+        return False
+    def offsets(image: LEImage, address: int) -> dict[int, tuple[int, int]]:
+        return {site - address: write for site, write in image.relocations().items()
+                if site < address + size and site + write[0] > address}
+    left, right = offsets(original, original_address), offsets(rebuilt, rebuilt_address)
+    if left.keys() != right.keys():
+        return False
+    expected = bytearray(original_data)
+    for offset, (width, target) in left.items():
+        if offset < 0 or offset + width > size or right[offset][0] != width:
+            return False
+        mapped = relocated_pointer_value(target, address_map, ranges)
+        if mapped is None or right[offset][1] != mapped:
+            return False
+        expected[offset:offset + width] = mapped.to_bytes(width, "little")
+    return expected == rebuilt_data
 
 
 def compare_address(
@@ -429,7 +490,7 @@ def format_comparison(summary: DataCompareSummary, verbose: bool = False) -> str
     lines = [
         f"Original: {summary.original_path}",
         f"Rebuilt:  {summary.rebuilt_path}",
-        f"Map:      {summary.map_path} ({summary.symbol_count} encoded-address symbols)",
+        f"Map:      {summary.map_path} ({summary.symbol_count} mapped globals)",
         f"Globals:  {summary.globals_path} ({summary.global_count} globals)",
         "",
         f"{'Orig Addr':<12} {'Rebuilt Addr':<14} {'Name':<28} {'Status':<10} Description",

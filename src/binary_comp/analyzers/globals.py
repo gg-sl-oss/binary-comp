@@ -1,4 +1,4 @@
-"""Audit global declarations against original PE data."""
+"""Audit global declarations against original executable data."""
 
 import ast
 import os
@@ -17,7 +17,9 @@ except ImportError:
     X86_OP_IMM = X86_OP_MEM = X86_OP_REG = None
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
-from binary_comp.core.mapfile import parse_encoded_address_symbols
+from binary_comp.core.mapfile import parse_encoded_address_symbols, parse_msvc_map_symbols, parse_watcom_map_symbols
+from binary_comp.core.image import load_image
+from binary_comp.core.le import LEImage
 from binary_comp.core.pe import PEImage
 from binary_comp.source.cpp import make_cpp_parser, node_text, parse_source_functions, sanitize_source, walk
 
@@ -75,6 +77,7 @@ class GlobalDecl:
     size: Optional[int] = None
     source_bytes: Optional[bytes] = None
     source_note: str = ""
+    path: str = ""
 
 
 @dataclass
@@ -263,7 +266,12 @@ def address_for_declaration(name: str, leading: str, statement: str, trailing: s
     address = address_from_encoded_suffix(name)
     if address is not None:
         return address
-    return address_from_comments("\n".join([leading, statement, trailing]))
+    # The declaration's own annotation outranks a preceding module comment.
+    for text in (trailing, statement, leading):
+        address = address_from_comments(text)
+        if address is not None:
+            return address
+    return None
 
 
 def has_no_address_annotation(text: str) -> bool:
@@ -371,6 +379,9 @@ def declaration_type_text(source: bytes, node, declarator) -> str:
     pointer_depth = declarator_pointer_depth(declarator)
     if pointer_depth == 0:
         return base_type
+    identifier = declarator_identifier_node(declarator)
+    if identifier is not None and b"__far" in source[node.start_byte:identifier.start_byte]:
+        base_type += " __far"
     if declarator.type == "function_declarator":
         return f"{base_type} {'*' * pointer_depth}"
     return f"{base_type}{'*' * pointer_depth}"
@@ -462,6 +473,15 @@ def parse_globals_file(path: str,
                        address_warnings: Optional[List[AddressWarning]] = None) -> List[GlobalDecl]:
     if not path or not os.path.exists(path):
         return []
+    if os.path.isdir(path):
+        suffixes = (".h", ".hh", ".hpp", ".hxx") if require_extern else (".c", ".cc", ".cpp", ".cxx")
+        result: List[GlobalDecl] = []
+        for root, dirs, files in os.walk(path):
+            dirs.sort()
+            for name in sorted(files):
+                if name.lower().endswith(suffixes):
+                    result.extend(parse_globals_file(os.path.join(root, name), require_extern, address_warnings))
+        return result
     with open(path, "rb") as f:
         source = f.read()
     tree = make_cpp_parser().parse(sanitize_source(source))
@@ -510,6 +530,7 @@ def parse_globals_file(path: str,
             dims=declarator_array_dims(source, declarator),
             has_initializer=initializer_node is not None,
             initializer=node_text(source, initializer_node).strip() if initializer_node is not None else None,
+            path=path,
         ))
     return decls
 
@@ -626,7 +647,7 @@ def eval_int_expr(expr: str, constants: Dict[str, int]) -> int:
 
 
 def normalize_type(type_text: str) -> str:
-    type_text = re.sub(r"\b(const|volatile|extern|static)\b", "", type_text)
+    type_text = re.sub(r"\b(const|volatile|extern|static|__cdecl|__pascal|__stdcall|__near)\b", "", type_text)
     type_text = re.sub(r"\s+", " ", type_text).strip()
     type_text = type_text.replace(" *", "*").replace("* ", "*")
     return type_text
@@ -660,10 +681,10 @@ def configure_globals(globals_config: Dict) -> Dict[int, int]:
 
 def base_type_size(type_text: str) -> Optional[int]:
     normalized = normalize_type(type_text)
-    if "*" in normalized:
-        return 4
     if normalized in TYPE_SIZES:
         return TYPE_SIZES[normalized]
+    if "*" in normalized:
+        return 6 if re.search(r"\b__far\b", normalized) else 4
     if normalized.startswith("struct "):
         return TYPE_SIZES.get(normalized)
     return None
@@ -750,6 +771,8 @@ def scalar_bytes(type_text: str, initializer: str, constants: Dict[str, int]) ->
         return struct.pack("<H", val & 0xFFFF)
     if size == 4:
         return struct.pack("<I", val & 0xFFFFFFFF)
+    if size == 6:
+        return (val & 0xFFFFFFFFFFFF).to_bytes(6, "little")
     return None
 
 
@@ -965,7 +988,9 @@ def symbolic_pointer_bytes(decl: GlobalDecl,
                            constants: Dict[str, int],
                            data_symbols: Dict[str, GlobalDecl],
                            function_symbols: Dict[str, int]) -> Tuple[Optional[bytes], str]:
-    if decl.initializer is None or decl.dims or "*" not in normalize_type(decl.type_text):
+    if decl.initializer is None or decl.dims:
+        return None, ""
+    if "*" not in normalize_type(decl.type_text) and decl.initializer.strip() not in function_symbols:
         return None, ""
     ptr = resolve_symbolic_pointer(decl.initializer, constants, data_symbols, function_symbols)
     if ptr is None:
@@ -1008,6 +1033,19 @@ def infer_source_bytes(decl: GlobalDecl,
         return
     if decl.initializer is None:
         return
+    if len(decl.dims) == 2 and normalize_type(decl.type_text) in ("char", "unsigned char", "signed char"):
+        rows = split_top_level_commas(strip_comments(decl.initializer).strip().strip("{}"))
+        if rows and all(row.lstrip().startswith('"') for row in rows):
+            try:
+                width = eval_int_expr(decl.dims[1], constants)
+                encoded = [parse_c_string_bytes(row) for row in rows]
+                if all(len(row) <= width for row in encoded):
+                    data = b"".join(row.ljust(width, b"\0") for row in encoded)
+                    if len(data) <= decl.size:
+                        decl.source_bytes = data.ljust(decl.size, b"\0")
+                        return
+            except (ValueError, SyntaxError):
+                pass
     if not decl.dims:
         data = scalar_bytes(decl.type_text, decl.initializer, constants)
         if data is not None:
@@ -1522,7 +1560,7 @@ def build_source_order_issues(decls: List[GlobalDecl],
             continue
         if not include_initialized and decl.has_initializer:
             continue
-        if previous is not None and decl.address < previous.address:
+        if previous is not None and decl.path == previous.path and decl.address < previous.address:
             issues.append(Issue("SOURCE_ORDER_DECREASE", decl.address, decl.name, decl.line,
                                 decl.size or 0, b"", None,
                                 f"declared after {previous.name} at 0x{previous.address:08x} "
@@ -1545,13 +1583,27 @@ def normalize_map_symbol(symbol: str) -> str:
     return symbol
 
 
-def rebuilt_symbol_indexes(map_path: str) -> tuple[dict[tuple[int, str], int], dict[int, list[tuple[str, int]]]]:
+def rebuilt_symbol_indexes(map_path: str, decls: Sequence[GlobalDecl] = (),
+                           segment_bases: dict[int, int] | None = None) -> tuple[dict[tuple[int, str], int], dict[int, list[tuple[str, int]]]]:
     exact: dict[tuple[int, str], int] = {}
     by_address: dict[int, list[tuple[str, int]]] = {}
     for entry in parse_encoded_address_symbols(map_path):
         name = normalize_map_symbol(entry.symbol)
         by_address.setdefault(entry.original_va, []).append((name, entry.rebuilt_va))
         exact[(entry.original_va, name)] = entry.rebuilt_va
+    symbols = (parse_watcom_map_symbols(map_path, segment_bases) if segment_bases is not None
+               else parse_msvc_map_symbols(map_path))
+    named: dict[str, set[int]] = {}
+    for symbol in symbols:
+        named.setdefault(normalize_map_symbol(symbol.symbol), set()).add(symbol.va)
+    for decl in decls:
+        matches = named.get(decl.name, set())
+        if len(matches) == 1:
+            va = next(iter(matches))
+            exact[(decl.address, decl.name)] = va
+            pair = (decl.name, va)
+            if pair not in by_address.setdefault(decl.address, []):
+                by_address[decl.address].append(pair)
     return exact, by_address
 
 
@@ -1940,6 +1992,20 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
         masked = mask_comments_for_layout_scan(text)
+        # An array extent in a file-scope declaration is not an indexed use.
+        # Keep initializer expressions visible: they can contain real escapes.
+        source = text.encode("utf-8")
+        tree = make_cpp_parser().parse(sanitize_source(source))
+        spans = []
+        for node in walk(tree.root_node):
+            if node.type == "declaration" and is_global_declaration_node(node):
+                initializer, declarator = declaration_value_and_declarator(node)
+                if declarator is not None:
+                    spans.append((declarator.start_byte, declarator.end_byte))
+        for start, end in reversed(spans):
+            start = len(source[:start].decode("utf-8"))
+            end = len(source[:end].decode("utf-8"))
+            masked = masked[:start] + re.sub(r"[^\n]", " ", masked[start:end]) + masked[end:]
         for match in ADDRESS_OF_NAME_RE.finditer(masked):
             name = match.group(1)
             decl = decls_by_name.get(name)
@@ -2413,12 +2479,13 @@ def build_rebuilt_layout_issues(decls: List[GlobalDecl],
                                 source_dirs: Sequence[str] = (),
                                 source_excludes: Sequence[str] = (),
                                 ignored_source_paths: Sequence[str] = (),
-                                asm_dir: str = "") -> List[Issue]:
+                                asm_dir: str = "",
+                                segment_bases: dict[int, int] | None = None) -> List[Issue]:
     if code_dir and not isinstance(code_dir, (str, bytes, os.PathLike)):
         if not source_dirs:
             source_dirs = code_dir
         code_dir = ""
-    exact, by_address = rebuilt_symbol_indexes(map_path)
+    exact, by_address = rebuilt_symbol_indexes(map_path, decls, segment_bases)
     by_addr = sorted(
         [decl for decl in decls if not is_cpp_vtable_placeholder(decl.name)],
         key=lambda d: d.address,
@@ -2583,6 +2650,8 @@ def build_issues(pe: PEImage,
                 ))
         original = pe.read(decl.address, decl.size)
         if original is None:
+            issues.append(Issue("ORIGINAL_RANGE_UNMAPPED", decl.address, decl.name, decl.line,
+                                decl.size, b"", decl.source_bytes, "global extends outside the original image"))
             continue
         if decl.address in runtime_seeded_globals:
             expected = struct.pack("<I", runtime_seeded_globals[decl.address])
@@ -2827,13 +2896,18 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
     runtime_seeded_globals = configure_globals(globals_config)
     runtime_initializer_copies = runtime_initializer_copy_map(globals_config)
     constants = parse_defines([inputs.globals_h, *inputs.define_headers])
-    pe = PEImage(inputs.exe)
+    pe = load_image(inputs.exe, relocate=True)
     address_warnings: List[AddressWarning] = []
     warning_sink: list[AddressWarning] | None = None if inputs.no_address_warnings else address_warnings
     decls = parse_globals_source(inputs.globals_source, warning_sink)
+    if not decls:
+        raise ConfigError(f"no addressed global definitions found in {inputs.globals_source}")
     header_decls = parse_globals_header(inputs.globals_h, warning_sink)
     code_globals = parse_code_globals(inputs.code_globals_h)
-    function_symbols = parse_function_symbols(os.path.dirname(inputs.globals_source) or ".")
+    function_symbols = parse_function_symbols(inputs.globals_source if os.path.isdir(inputs.globals_source)
+                                              else os.path.dirname(inputs.globals_source) or ".")
+    for name, address in globals_config.get("function_addresses", {}).items():
+        function_symbols[name] = parse_int(address, f"globals.function_addresses.{name}")
     issues = build_issues(pe, decls, header_decls, code_globals, function_symbols,
                           constants,
                           runtime_seeded_globals,
@@ -2841,6 +2915,7 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
                           inputs.min_address, inputs.include_code_globals, inputs.include_symbolic,
                           not inputs.no_source_order, inputs.source_order_all)
     if inputs.check_rebuilt_layout:
+        rebuilt = load_image(target.rebuilt_exe) if isinstance(pe, LEImage) else None
         issues.extend(build_rebuilt_layout_issues(
             decls,
             inputs.map_path,
@@ -2850,6 +2925,7 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
             inputs.source_excludes,
             (inputs.globals_source, inputs.globals_h or ""),
             asm_dir=inputs.asm_dir,
+            segment_bases=rebuilt.segment_bases() if isinstance(rebuilt, LEImage) else None,
         ))
         issues.sort(key=lambda x: (x.address, x.category, x.name))
     if inputs.max_address is not None:

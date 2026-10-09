@@ -13,6 +13,9 @@ CALLING_CONVENTIONS = (
     b"__fastcall",
     b"__stdcall",
     b"__thiscall",
+    b"__pascal",
+    b"__far",
+    b"__near",
     b"CALLBACK",
     b"WINAPI",
 )
