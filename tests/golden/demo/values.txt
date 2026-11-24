@@ -1,0 +1,24 @@
+$ binary-comp values --config binary-comp.json --target demo --no-build --include-stack-locals
+exit: 0
+--- stdout ---
+
+ScoreTable::score (orig 0x401029, rebuilt 0x401000, 100.0%) - 1 mismatch(es):
+    IMM 12 vs 10: 0x00401017 cmp dword ptr [ebp - 4], 0xc  |  0x00401040 cmp dword ptr [ebp - 4], 0xa
+
+LessonLog::severity (orig 0x4010E8, rebuilt 0x4010A8, 58.8%) - 3 mismatch(es):
+    OFFSET 0xFFFFFFF8 vs 0xFFFFFFE4: 0x004010B1 mov dword ptr [ebp - 8], ecx  |  0x00401106 mov dword ptr [ebp - 0x1c], ecx
+    OFFSET 0xFFFFFFF8 vs 0xFFFFFFE4: 0x004010B4 mov eax, dword ptr [ebp - 8]  |  0x00401109 mov eax, dword ptr [ebp - 0x1c]
+    IMM 76 vs 65: 0x004010C6 cmp eax, 0x4c  |  0x0040112E cmp eax, 0x41
+
+--- Mismatch Breakdown ---
+By kind: IMM 2, OFFSET 2
+Top functions:
+  LessonLog::severity: 3 (IMM 1, OFFSET 2; 58.8%)
+  ScoreTable::score: 1 (IMM 1; 100.0%)
+
+--- Summary ---
+Functions checked: 5
+With value mismatches: 2
+Total mismatches: 4
+Skipped (no bytes/disassembly): 0
+--- stderr ---

@@ -1,0 +1,22 @@
+$ binary-comp data --config binary-comp.json --target demo
+exit: 1
+--- stdout ---
+Original: <DEMO>/artifacts/original/original.exe
+Rebuilt:  <DEMO>/artifacts/rebuilt/rebuilt.exe
+Map:      <DEMO>/artifacts/rebuilt/rebuilt.map (4 mapped globals)
+Globals:  <DEMO>/src/rebuilt/rebuilt.cpp (4 globals)
+
+Orig Addr    Rebuilt Addr   Name                         Status     Description
+--------------------------------------------------------------------------------------------
+0x00407030   0x00405030     g_Title_00407030             OK         init: "ALIEN!"
+0x00407038   0x00405038     g_Bonus_00407038             MISMATCH   init: 9
+             Original: 07 00 00 00
+             Rebuilt:  09 00 00 00
+             Original value: 0x00000007 (7)
+             Rebuilt value:  0x00000009 (9)
+
+0x0040703c   0x0040503c     g_Threshold_0040703C         OK         init: 10
+0x00407040   0x00405040     g_Rotor_00407040             OK         init: {3, 5, 8}
+--------------------------------------------------------------------------------------------
+Summary: 3 matches, 1 mismatches, 0 not in rebuilt map
+--- stderr ---

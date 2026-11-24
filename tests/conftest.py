@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import struct
 import sys
 from pathlib import Path
@@ -74,3 +75,45 @@ def sample_binaries(tmp_path: Path) -> tuple[Path, Path]:
     write_tiny_pe(original)
     write_tiny_pe(rebuilt)
     return original, rebuilt
+
+
+GOLDEN_DIR = Path(__file__).parent / "golden"
+UPDATE_GOLDEN = os.environ.get("BINARY_COMP_UPDATE_GOLDEN") == "1"
+
+
+def run_cli(argv: list[str], capsys, replacements: dict[str, str]) -> str:
+    """Run the CLI in-process and return its exit code and output as one text.
+
+    Each key in ``replacements`` (usually a temporary directory) is replaced
+    by its placeholder so the text does not depend on where the test ran.
+    """
+    from binary_comp.cli import main
+
+    capsys.readouterr()
+    code = main(argv)
+    captured = capsys.readouterr()
+    text = (
+        f"$ binary-comp {' '.join(argv)}\n"
+        f"exit: {code}\n"
+        f"--- stdout ---\n{captured.out}"
+        f"--- stderr ---\n{captured.err}"
+    )
+    for old, new in sorted(replacements.items(), key=lambda item: -len(item[0])):
+        text = text.replace(old, new)
+    return text
+
+
+def assert_golden(name: str, actual: str) -> None:
+    """Compare ``actual`` with ``tests/golden/<name>.txt``.
+
+    Set BINARY_COMP_UPDATE_GOLDEN=1 to rewrite the snapshot instead; review
+    the resulting diff before committing it.
+    """
+    path = GOLDEN_DIR / f"{name}.txt"
+    if UPDATE_GOLDEN:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(actual, encoding="utf-8")
+        return
+    if not path.exists():
+        pytest.fail(f"missing golden file {path}; run with BINARY_COMP_UPDATE_GOLDEN=1 to create it")
+    assert actual == path.read_text(encoding="utf-8")

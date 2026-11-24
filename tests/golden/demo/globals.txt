@@ -1,0 +1,31 @@
+$ binary-comp globals --config binary-comp.json --target demo --fail-on-issues
+exit: 1
+--- stdout ---
+Global initialization/layout audit
+  original exe: <DEMO>/artifacts/original/original.exe
+  source:       <DEMO>/src/rebuilt/rebuilt.cpp
+  definitions:  4
+  issues:       1
+  warnings:     0
+  auto-complete global side effects: 3 (0 reviewed, 3 unreviewed)
+
+INIT_MISMATCH                   0x00407038 g_Bonus_00407038:2 size=4
+  original: 07 00 00 00  ?...
+  source:   09 00 00 00  ?...
+
+Auto-complete global side effects (unreviewed)
+UNREVIEWED 0x00403460
+  note: CRT initializer table 0x00407000..0x00407008
+  DIRECT_WRITE      0x00403488 0x0040824c                           MOV dword ptr [0x40824c], eax
+UNREVIEWED 0x004045c0
+  note: CRT initializer table 0x0040700c..0x00407018
+  DIRECT_WRITE      0x004045cd 0x004093d8                           MOV dword ptr [0x4093d8], eax
+  DIRECT_WRITE      0x004045f0 0x004093d4                           MOV dword ptr [0x4093d4], eax
+UNREVIEWED 0x00404660
+  note: CRT initializer table 0x0040700c..0x00407018
+  DIRECT_WRITE      0x0040466a 0x004092c0                           MOV dword ptr [0x4092c0], 0x200
+  DIRECT_WRITE      0x0040467f 0x004092c0                           MOV dword ptr [0x4092c0], 0x14
+  DIRECT_WRITE      0x00404699 0x004082b4                           MOV dword ptr [0x4082b4], eax
+  DIRECT_WRITE      0x004046a2 0x004092c0                           MOV dword ptr [0x4092c0], 0x14
+  DIRECT_WRITE      0x004046b8 0x004082b4                           MOV dword ptr [0x4082b4], eax
+--- stderr ---

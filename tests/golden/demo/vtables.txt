@@ -1,0 +1,32 @@
+$ binary-comp vtables --config binary-comp.json --target demo
+exit: 0
+--- stdout ---
+Binary:  <DEMO>/artifacts/original/original.exe
+Code:    0x00401000..0x00405600
+Rdata:   0x00406000..0x00406400
+Vtables: 0 unique addresses
+Classes: 0 with vtable info
+Parents: 0 invalid references
+Parents without vtable info: 0 references
+Ctor hierarchy: 0 checked, 0 warnings
+Impls:   5 Function start comments
+
+============================================================================================================================
+Class                  Vtable         Parent             #    Inh  Ovr  OK   Stub  Miss  Bad  Status
+============================================================================================================================
+============================================================================================================================
+
+Total vtable slots:            0
+  Inherited:                   0
+  Overrides:                   0
+    Implemented:               0
+    Sdtors (compiler):         0
+    Purecalls (= 0):           0
+    Trivial helpers/thunks:    0
+    Missing (real code):       0
+    Implemented but wrong slot: 0
+
+Rebuilt vtable verification (compiler output vs original)
+============================================================================
+  skipped: no ??_7<Class>@@6B@ vtable symbols in the linker map
+--- stderr ---

@@ -1,0 +1,14 @@
+$ binary-comp calls --config binary-comp.json --target demo --no-build
+exit: 0
+--- stdout ---
+
+======================================================================
+CALL TARGET VERIFICATION REPORT
+  (showing only resolved-name mismatches; use --all for everything)
+======================================================================
+Functions selected: 5
+Functions checked: 1
+Functions with call target mismatches: 0
+
+All call targets match!
+--- stderr ---

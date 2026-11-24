@@ -1,0 +1,9 @@
+$ binary-comp omf-compare --bits 32 --original <TMP>/original.bin --original-offset 0x30 --object <TMP>/sample.obj --symbol CheckSlot_ --size 11
+exit: 0
+--- stdout ---
+OMF comparison for omf-function
+  original: <TMP>/original.bin+0x30
+  object:   <TMP>/sample.obj LEDATA+0x10
+  size:     11 byte(s), masked fixup byte(s): 4
+  result:   MATCH
+--- stderr ---

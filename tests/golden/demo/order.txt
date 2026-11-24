@@ -1,0 +1,51 @@
+$ binary-comp order --config binary-comp.json --target demo
+exit: 0
+--- stdout ---
+Compilation-unit order and boundary hints
+Target: demo
+
+Observed original-code starts: 6
+  Source-mapped:            4
+  Unmapped/generated:       2
+  With disassembly facts:   6
+  16-byte aligned:          1
+  Unaligned:                5
+Source files:               1
+Original-address file runs: 1
+Boundary candidates:        0
+
+Hints are not recovered debug metadata. Confirm candidates with controlled split/join builds
+and a whole-project regression gate.
+
+Initializer-like pointer tables
+  .data 0x00407010-0x00407018: 2 executable target(s): 0x004045C0, 0x00404660
+
+Source-file order hints
+  U rows are ordered by each file's first mapped original start; interleaved runs mean
+  that a current source file is not evidence of one historical compilation unit.
+  U001 0x00401029-0x00401185 rebuilt.cpp (5 definition(s), 1 run(s)) rebuilt@0x00401000
+
+Source files needing order review
+  (none)
+
+Boundary candidates
+  B scores rank accumulated evidence; they are not probabilities or proof.
+  (none at the current evidence threshold)
+
+Strongest same-context / boundary-unlikely hints
+  B-8  0x004010E8 LessonLog::severity [rebuilt.cpp] 50.00%
+       -> 0x00401161 FUN_00401161 [<unmapped>]
+       successor is not 16-byte aligned; one or both entries lack an unambiguous source mapping; successor is a tiny helper/thunk candidate; the adjacent entries directly call or jump to each other
+  B-6  0x0040109E Door::canOpen [rebuilt.cpp] 80.00%
+       -> 0x004010E8 LessonLog::severity [rebuilt.cpp] 50.00%
+       successor is not 16-byte aligned; both entries map to rebuilt.cpp
+  B-6  0x00401061 Reactor::tick [rebuilt.cpp] 96.15%
+       -> 0x0040109E Door::canOpen [rebuilt.cpp] 80.00%
+       successor is not 16-byte aligned; both entries map to rebuilt.cpp
+  B-6  0x00401029 ScoreTable::score [rebuilt.cpp] 100.00%
+       -> 0x00401061 Reactor::tick [rebuilt.cpp] 96.15%
+       successor is not 16-byte aligned; both entries map to rebuilt.cpp
+  B-6  0x00401000 FUN_00401000 [<unmapped>]
+       -> 0x00401029 ScoreTable::score [rebuilt.cpp] 100.00%
+       successor is not 16-byte aligned; one or both entries lack an unambiguous source mapping
+--- stderr ---
