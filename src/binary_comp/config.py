@@ -78,6 +78,15 @@ def parse_int(value: Any, label: str) -> int:
     raise ConfigError(f"{label} must be an integer or integer string")
 
 
+def config_int(value: Any, label: str, *, required: bool = True) -> int | None:
+    """Like ``parse_int``, but a missing value is an error only if ``required``."""
+    if value in (None, ""):
+        if required:
+            raise ConfigError(f"missing required configuration value: {label}")
+        return None
+    return parse_int(value, label)
+
+
 def require_string(config: dict[str, Any], key: str, label: str) -> str:
     value = config.get(key)
     if not isinstance(value, str) or not value:
@@ -85,13 +94,26 @@ def require_string(config: dict[str, Any], key: str, label: str) -> str:
     return value
 
 
-def optional_string(config: dict[str, Any], key: str) -> str | None:
-    value = config.get(key)
-    if value in (None, ""):
+def optional_string(config: dict[str, Any], *keys: str) -> str | None:
+    """The first of ``keys`` that has a non-empty value, or None."""
+    for key in keys:
+        value = config.get(key)
+        if value in (None, ""):
+            continue
+        if not isinstance(value, str):
+            raise ConfigError(f"{key} must be a string")
+        return value
+    return None
+
+
+def resolve_config_path(config_path: str | os.PathLike[str], path: str | None) -> str | None:
+    """Resolve ``path`` relative to the directory holding the config file."""
+    if path is None:
         return None
-    if not isinstance(value, str):
-        raise ConfigError(f"{key} must be a string")
-    return value
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return str(candidate)
+    return str(Path(config_path).resolve().parent / candidate)
 
 
 def _source_dirs(value: Any, label: str) -> tuple[str, ...]:

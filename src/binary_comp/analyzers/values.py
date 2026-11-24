@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from dataclasses import dataclass, field
-from importlib import resources
 
-from binary_comp.config import ConfigError, ProjectTarget, parse_int
+from binary_comp.config import ProjectTarget
 from binary_comp.core.align import lcs_align
 from binary_comp.core.disasm import (
     Instruction,
@@ -19,6 +17,7 @@ from binary_comp.core.disasm import (
     is_branch_or_call,
     next_boundary,
     switch_jump_table_ranges,
+    signed32,
     trim_leading_stack_probe,
     unsigned32,
 )
@@ -27,6 +26,7 @@ from binary_comp.core.le import LEImage
 from binary_comp.core.mapfile import function_starts_from_map, parse_watcom_map_by_obj
 from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import canonical_function_name
+from binary_comp.policy import VerifierPolicy
 from binary_comp.source.functions import FunctionGroup, load_source_groups, map_source_groups
 
 
@@ -38,21 +38,6 @@ class CheckResult:
     original_count: int
     rebuilt_count: int
     warnings: tuple
-
-
-@dataclass(frozen=True)
-class VerifierPolicy:
-    max_disassembly_bytes: int
-    max_member_displacement: int
-    nearby_window: int
-    small_immediate_min: int
-    small_immediate_max: int
-    value_mnemonics: frozenset[str]
-    padding_mnemonics: frozenset[str]
-    stack_registers: frozenset[str]
-    diagnostic_functions: frozenset[str]
-    allowed_one_char_strings: frozenset[str]
-    rejected_string_substrings: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -94,68 +79,6 @@ class ValuesSummary:
     # Every function compared, not only the ones that differ, so a single run
     # answers "how close is the whole project" as well as "what is wrong".
     similarity: tuple[tuple[str, float], ...] = ()
-
-
-def default_policy_path() -> str:
-    return str(resources.files("binary_comp.data").joinpath("default_values_policy.json"))
-
-
-def required_config(config: dict, key: str, label: str):
-    if not isinstance(config, dict):
-        raise ConfigError(f"{label} must be a JSON object")
-    if key not in config:
-        raise ConfigError(f"missing required value-check config field: {label}.{key}")
-    return config[key]
-
-
-def string_list_config(config: dict, key: str, label: str) -> list[str]:
-    value = required_config(config, key, label)
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ConfigError(f"{label}.{key} must be a list of strings")
-    return value
-
-
-def load_policy(path: str | None = None) -> VerifierPolicy:
-    if not path:
-        path = default_policy_path()
-    if not os.path.exists(path):
-        raise ConfigError(f"value-check policy file not found: {path}")
-
-    with open(path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    if not isinstance(config, dict):
-        raise ConfigError(f"value-check policy root must be an object: {path}")
-
-    literal_config = required_config(config, "literal_strings", "policy")
-    return VerifierPolicy(
-        max_disassembly_bytes=parse_int(
-            required_config(config, "max_disassembly_bytes", "policy"),
-            "policy.max_disassembly_bytes",
-        ),
-        max_member_displacement=parse_int(
-            required_config(config, "max_member_displacement", "policy"),
-            "policy.max_member_displacement",
-        ),
-        nearby_window=parse_int(required_config(config, "nearby_window", "policy"), "policy.nearby_window"),
-        small_immediate_min=parse_int(
-            required_config(config, "small_immediate_min", "policy"),
-            "policy.small_immediate_min",
-        ),
-        small_immediate_max=parse_int(
-            required_config(config, "small_immediate_max", "policy"),
-            "policy.small_immediate_max",
-        ),
-        value_mnemonics=frozenset(m.lower() for m in string_list_config(config, "value_mnemonics", "policy")),
-        padding_mnemonics=frozenset(m.lower() for m in string_list_config(config, "padding_mnemonics", "policy")),
-        stack_registers=frozenset(r.lower() for r in string_list_config(config, "stack_registers", "policy")),
-        diagnostic_functions=frozenset(string_list_config(config, "diagnostic_functions", "policy")),
-        allowed_one_char_strings=frozenset(
-            string_list_config(literal_config, "allowed_one_char", "policy.literal_strings")
-        ),
-        rejected_string_substrings=tuple(
-            string_list_config(literal_config, "reject_substrings", "policy.literal_strings")
-        ),
-    )
 
 
 def normalize_string(value: str) -> str:
@@ -2040,9 +1963,7 @@ def sign_step_outputs(instrs: list[Instruction], idx: int) -> tuple[int, int] | 
             value = int(not negative)
         value = ((value - 1) & mask) & 0xFFFFFFFF
         value = (value + (1 if adjustment.mnemonic == "inc" else -1)) & 0xFFFFFFFF
-        if value & 0x80000000:
-            value -= 0x100000000
-        outputs.append(value)
+        outputs.append(signed32(value))
     return tuple(outputs)
 
 
@@ -2455,11 +2376,6 @@ def equivalent_low_word_mask(
     ) and masked_register_only_stored_as_word(
         original_instrs, oi, o_dst.reg
     )
-
-
-def signed32(value: int) -> int:
-    value = unsigned32(value)
-    return value - 0x100000000 if value & 0x80000000 else value
 
 
 def nearby_register_shift(

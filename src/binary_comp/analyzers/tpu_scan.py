@@ -10,6 +10,7 @@ from typing import Any
 
 from binary_comp.analyzers.tp_overlay import TpOverlayDescriptor, parse_tp_overlay
 from binary_comp.analyzers.tpu import build_mask, load_tpu_object, locate_code_window
+from binary_comp.config import parse_int
 from binary_comp.core.mz import parse_mz
 
 
@@ -90,17 +91,6 @@ class TpuScanResult:
         return sum(match.size for match in self.matches if match.is_unique)
 
 
-def _config_int(value: Any, label: str) -> int:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value, 0)
-        except ValueError:
-            pass
-    raise ValueError(f"{label} must be an integer or integer string")
-
-
 def parse_tpu_scan_regions(payload: dict[str, Any]) -> TpuScanRegions:
     """Parse a generic resident/overlay region manifest.
 
@@ -122,15 +112,15 @@ def parse_tpu_scan_regions(payload: dict[str, Any]) -> TpuScanRegions:
             label = f"scan_regions.{image}[{ordinal}]"
             if not isinstance(item, dict):
                 raise ValueError(f"{label} must be an object")
-            start = _config_int(item.get("start"), f"{label}.start")
-            end = _config_int(item.get("end"), f"{label}.end")
+            start = parse_int(item.get("start"), f"{label}.start")
+            end = parse_int(item.get("end"), f"{label}.end")
             if start < 0 or end <= start:
                 raise ValueError(f"{label} must satisfy 0 <= start < end")
             name = item.get("label", f"{image}-{ordinal}")
             if not isinstance(name, str) or not name:
                 raise ValueError(f"{label}.label must be a non-empty string")
             index_value = item.get("index")
-            index = None if index_value is None else _config_int(index_value, f"{label}.index")
+            index = None if index_value is None else parse_int(index_value, f"{label}.index")
             regions.append(TpuScanRegion(image, start, end, name, index))
         regions.sort(key=lambda region: (region.start, region.end, region.label))
         for left, right in zip(regions, regions[1:]):

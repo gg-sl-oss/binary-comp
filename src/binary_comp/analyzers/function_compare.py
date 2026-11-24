@@ -7,7 +7,6 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-from binary_comp.analyzers.values import load_policy
 from binary_comp.config import ConfigError, ProjectTarget
 from binary_comp.core.disasm import (
     Instruction,
@@ -22,6 +21,7 @@ from binary_comp.core.symbols import (
     symbol_matches,
     symbol_patterns_for_function,
 )
+from binary_comp.policy import load_policy
 from binary_comp.source.functions import load_source_groups, map_source_groups
 
 

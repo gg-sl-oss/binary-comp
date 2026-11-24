@@ -47,7 +47,14 @@ from binary_comp.analyzers.function_compare import (
     mnemonic_similarity,
 )
 from binary_comp.analyzers.report import SimilarityReport, SimilarityReportOptions, SimilarityReportRow
-from binary_comp.config import ProjectTarget
+from binary_comp.config import (
+    ProjectTarget,
+    config_int,
+    optional_string,
+    require_string,
+    resolve_config_path,
+)
+from binary_comp.core.binary import masked_count, masked_mismatches, relocation_mask
 from binary_comp.core.disasm import Instruction, disassemble_raw_16
 
 
@@ -189,15 +196,11 @@ class TpuComparison:
 
     @property
     def masked_count(self) -> int:
-        return sum(1 for value in self.mask if value == 0)
+        return masked_count(self.mask)
 
     @property
     def mismatches(self) -> tuple[int, ...]:
-        return tuple(
-            index
-            for index, (left, right, mask) in enumerate(zip(self.original, self.rebuilt, self.mask))
-            if mask and left != right
-        )
+        return masked_mismatches(self.original, self.rebuilt, self.mask)
 
     @property
     def matches(self) -> bool:
@@ -592,15 +595,7 @@ def select_code_window(
 
 
 def build_mask(size: int, fixups: tuple[TpuFixup, ...], window_start: int = 0) -> bytes:
-    mask = bytearray([0xFF] * size)
-    for fixup in fixups:
-        start = fixup.offset - window_start
-        end = start + fixup.length
-        if end <= 0 or start >= size:
-            continue
-        for index in range(max(0, start), min(size, end)):
-            mask[index] = 0
-    return bytes(mask)
+    return relocation_mask(size, ((fixup.offset, fixup.length) for fixup in fixups), window_start)
 
 
 def _longest_fixed_run(mask: bytes) -> tuple[int, int]:
@@ -745,48 +740,6 @@ def compare_tpu_spec(spec: TpuCompareSpec) -> FunctionComparison:
     )
 
 
-def parse_config_int(value: Any, label: str, *, required: bool = True) -> int | None:
-    if value in (None, ""):
-        if required:
-            raise TpuCompareError(f"missing required configuration value: {label}")
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value, 0)
-        except ValueError:
-            pass
-    raise TpuCompareError(f"{label} must be an integer or integer string")
-
-
-def require_config_string(config: dict[str, Any], key: str, label: str) -> str:
-    value = config.get(key)
-    if not isinstance(value, str) or not value:
-        raise TpuCompareError(f"missing required configuration value: {label}")
-    return value
-
-
-def optional_config_string(config: dict[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = config.get(key)
-        if value in (None, ""):
-            continue
-        if not isinstance(value, str):
-            raise TpuCompareError(f"{key} must be a string")
-        return value
-    return None
-
-
-def resolve_config_path(config_path: str | Path, path: str | None) -> str | None:
-    if path is None:
-        return None
-    candidate = Path(path)
-    if candidate.is_absolute():
-        return str(candidate)
-    return str(Path(config_path).resolve().parent / candidate)
-
-
 def load_tpu_specs(
     config: dict[str, Any],
     config_path: str | Path,
@@ -804,32 +757,32 @@ def load_tpu_specs(
         label = f"tpu_compare.functions[{index}]"
         if not isinstance(item, dict):
             raise TpuCompareError(f"{label} must be an object")
-        item_target = optional_config_string(item, "target")
+        item_target = optional_string(item, "target")
         if target_name is not None and item_target not in (None, target_name):
             continue
-        name = require_config_string(item, "name", f"{label}.name")
-        original = require_config_string(item, "original", f"{label}.original")
-        tpu_path = optional_config_string(item, "tpu", "object")
+        name = require_string(item, "name", f"{label}.name")
+        original = require_string(item, "original", f"{label}.original")
+        tpu_path = optional_string(item, "tpu", "object")
         if tpu_path is None:
             raise TpuCompareError(f"missing required configuration value: {label}.tpu")
-        function_name = optional_config_string(item, "function") or name
+        function_name = optional_string(item, "function") or name
         locate = bool(item.get("locate"))
         specs.append(TpuCompareSpec(
             name=name,
             function_name=function_name,
             original_path=resolve_config_path(config_path, original) or "",
-            original_offset=parse_config_int(
+            original_offset=config_int(
                 item.get("original_offset"), f"{label}.original_offset", required=not locate
             ),
             tpu_path=resolve_config_path(config_path, tpu_path) or "",
-            size=parse_config_int(item.get("size"), f"{label}.size", required=False),
-            code_offset=parse_config_int(item.get("code_offset", 0), f"{label}.code_offset") or 0,
-            block_offset=parse_config_int(item.get("block_offset", 0), f"{label}.block_offset") or 0,
-            block_index=parse_config_int(item.get("block_index"), f"{label}.block_index", required=False),
+            size=config_int(item.get("size"), f"{label}.size", required=False),
+            code_offset=config_int(item.get("code_offset", 0), f"{label}.code_offset") or 0,
+            block_offset=config_int(item.get("block_offset", 0), f"{label}.block_offset") or 0,
+            block_index=config_int(item.get("block_index"), f"{label}.block_index", required=False),
             locate=locate,
-            source_path=resolve_config_path(config_path, optional_config_string(item, "source")),
+            source_path=resolve_config_path(config_path, optional_string(item, "source")),
             target=item_target,
-            compiler_flags=optional_config_string(item, "compiler_flags"),
+            compiler_flags=optional_string(item, "compiler_flags"),
         ))
     return tuple(specs)
 

@@ -8,7 +8,36 @@ at the target address yet.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+
+
+def relocation_mask(size: int, spans: Iterable[tuple[int, int]], window_start: int = 0) -> bytes:
+    """Mask for a ``size``-byte window: 0x00 under a relocation, 0xFF elsewhere.
+
+    ``spans`` are ``(offset, length)`` pairs in the same address space as
+    ``window_start``; parts that fall outside the window are ignored.
+    """
+    mask = bytearray([0xFF] * size)
+    for offset, length in spans:
+        start = max(0, offset - window_start)
+        end = min(size, offset - window_start + length)
+        if start < end:
+            mask[start:end] = bytes(end - start)
+    return bytes(mask)
+
+
+def masked_mismatches(original: bytes, rebuilt: bytes, mask: bytes) -> tuple[int, ...]:
+    """Offsets where the inputs differ outside the masked bytes."""
+    return tuple(
+        index
+        for index, (left, right, keep) in enumerate(zip(original, rebuilt, mask))
+        if keep and left != right
+    )
+
+
+def masked_count(mask: bytes) -> int:
+    return mask.count(0)
 
 
 @dataclass(frozen=True)

@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from binary_comp.analyzers.function_compare import direct_branch_target, disassemble_function
-from binary_comp.analyzers.values import load_policy
 from binary_comp.config import ConfigError, ProjectTarget
 from binary_comp.core.disasm import Instruction
 from binary_comp.core.ghidra import function_starts_from_export_dir
 from binary_comp.core.mapfile import MapEntry, function_starts_from_map, parse_msvc_map_by_obj
 from binary_comp.core.pe import EXECUTABLE_FLAG, PEImage, Section
 from binary_comp.core.symbols import normalize_compiled
+from binary_comp.policy import load_policy
 from binary_comp.source.functions import load_source_groups
 
 

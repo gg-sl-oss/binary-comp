@@ -33,9 +33,9 @@ from binary_comp.analyzers.values import (
     check_values,
     compare_instruction_pair,
     format_summary,
-    load_policy,
     same_effective_lea_displacement,
 )
+from binary_comp.policy import load_policy
 from binary_comp.config import BuildConfig, ProjectTarget, load_project_target
 from binary_comp.core.disasm import Instruction, Operand
 from binary_comp.source.cpp import parse_source_function_groups
