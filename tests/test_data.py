@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import struct
 
+import pytest
+
 from binary_comp.analyzers.data import (
     DataOptions,
     compare_address,
@@ -244,6 +246,8 @@ def test_rebuilt_layout_check_reports_split_overlapping_globals(tmp_path):
 
 
 def test_rebuilt_layout_check_reports_split_adjacent_globals_used_as_layout_base(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     map_path = tmp_path / "rebuilt.map"
     map_path.write_text(
         " 0003:00000000       _DAT_00402000      00406000     <common>\n"
@@ -269,6 +273,8 @@ def test_rebuilt_layout_check_reports_split_adjacent_globals_used_as_layout_base
 
 
 def test_rebuilt_layout_check_reports_split_adjacent_array_used_as_pointer_base(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     map_path = tmp_path / "rebuilt.map"
     map_path.write_text(
         " 0003:00000000       _DAT_00482780      00406000     <common>\n"
@@ -294,6 +300,8 @@ def test_rebuilt_layout_check_reports_split_adjacent_array_used_as_pointer_base(
 
 
 def test_rebuilt_layout_check_ignores_split_adjacent_globals_without_layout_use(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     map_path = tmp_path / "rebuilt.map"
     map_path.write_text(
         " 0003:00000000       _DAT_00402000      00406000     <common>\n"
@@ -317,6 +325,8 @@ def test_rebuilt_layout_check_ignores_split_adjacent_globals_without_layout_use(
 
 
 def test_rebuilt_layout_check_ignores_in_bounds_array_subscript(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     map_path = tmp_path / "rebuilt.map"
     map_path.write_text(
         " 0003:00000000       _DAT_00402000      00406000     <common>\n"
@@ -339,6 +349,8 @@ def test_rebuilt_layout_check_ignores_in_bounds_array_subscript(tmp_path):
 
 
 def test_rebuilt_layout_check_ignores_in_bounds_array_pointer_walk(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     map_path = tmp_path / "rebuilt.map"
     map_path.write_text(
         " 0003:00000000       _DAT_00402000      00406000     <common>\n"
@@ -361,6 +373,8 @@ def test_rebuilt_layout_check_ignores_in_bounds_array_pointer_walk(tmp_path):
 
 
 def test_rebuilt_layout_check_ignores_one_past_array_address(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     map_path = tmp_path / "rebuilt.map"
     map_path.write_text(
         " 0003:00000000       _g_Items_00402000      00406000     <common>\n"
@@ -453,6 +467,8 @@ def test_rebuilt_layout_check_ignores_pointer_global_element_address(tmp_path):
 
 
 def test_rebuilt_layout_check_ignores_constant_in_bounds_field_access(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     map_path = tmp_path / "rebuilt.map"
     map_path.write_text(
         " 0003:00000000       _DAT_00402000      00406000     <common>\n"

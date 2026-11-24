@@ -66,6 +66,8 @@ def test_similarity_report_filter_limits_rows(fixture_root, sample_binaries):
 
 
 def test_similarity_report_counts_missing_asm(fixture_root, sample_binaries, tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     original, rebuilt = sample_binaries
     target = ProjectTarget(
         name="full",

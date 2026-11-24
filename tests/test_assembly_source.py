@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from binary_comp.source.assembly import parse_assembly_function_comments
 from binary_comp.source.cpp import parse_source_function_groups, parse_source_function_markers
 from binary_comp.source.functions import load_source_groups
@@ -66,6 +68,8 @@ def test_assembly_markers_name_the_procedure_that_follows(tmp_path):
 
 
 def test_assembly_groups_are_inventoried_with_the_c_sources(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     write(tmp_path)
     (tmp_path / "screens.c").write_text("/* Function start: 0x00439C10 */\nvoid FillBytes(void)\n{\n}\n")
     (tmp_path / "notes.txt").write_text("; Function start: 0x00439000\nIgnored proc\n")
