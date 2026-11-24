@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 
+from binary_comp.build import maybe_build
 from binary_comp.config import ConfigError, ProjectTarget
 from binary_comp.core.disasm import (
     Instruction,
@@ -52,20 +52,6 @@ class FunctionComparison:
     similarity: float
     rebuilt: DisassemblyResult
     original: DisassemblyResult
-
-
-def maybe_build(target: ProjectTarget, do_build: bool) -> None:
-    if not do_build:
-        return
-    if target.build.clean:
-        subprocess.run(target.build.clean.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if not target.build.build:
-        return
-    build_command = target.build.build.split()
-    if target.build.jobs and target.build.jobs > 1:
-        build_command.append(f"-j{target.build.jobs}")
-    if subprocess.run(build_command, check=False).returncode != 0:
-        raise FunctionCompareError("build failed")
 
 
 def load_disassembly_policy(target: ProjectTarget) -> tuple[int, frozenset[str]]:

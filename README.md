@@ -350,7 +350,11 @@ reveals source that treats adjacent original globals as one array even though
 the linker relocated those globals independently in the rebuilt image.
 
 Most analyzers that read rebuilt code will run the configured build command
-first unless `--no-build` is supplied.
+first unless `--no-build` is supplied. The target's `build.clean` command runs
+first, then `build.build` with `-jN` appended when `build.jobs` is above 1.
+Both are split like shell words, so quoted arguments are kept together, but no
+shell runs them. If either command fails, the analyzer stops with an error
+that names the command and its exit code.
 
 `report --reasons FILE.csv` appends a short list of functions whose current
 similarity is below 90%, sorted by score. The CSV uses hexadecimal original

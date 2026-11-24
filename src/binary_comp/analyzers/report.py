@@ -14,11 +14,11 @@ from binary_comp.analyzers.function_compare import (
     disassemble_exported_function,
     instruction_mnemonics,
     load_disassembly_policy,
-    maybe_build,
     mnemonic_similarity,
 )
 from binary_comp.analyzers.byte_compare import ByteComparison, compare_function_bytes
 from binary_comp.analyzers.calls import asm_path_for_source as calls_asm_path_for_source
+from binary_comp.build import maybe_build
 from binary_comp.config import ProjectTarget
 from binary_comp.core.disasm import normalize_mnemonic
 from binary_comp.core.ghidra import function_starts_from_export_dir
