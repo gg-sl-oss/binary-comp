@@ -58,7 +58,6 @@ TPU9_SIGNATURE = b"TPU9"
 # Header field byte offsets (all 16-bit words). TP5 stores code relocations
 # before typed constants; TP6 moves constants ahead of both relocation tables.
 _TPU5_OFS_CODE_BLOCKS = 0x0C
-_TPU5_OFS_CONST_BLOCKS = 0x0E
 _TPU5_OFS_SIZES = 0x18  # sym_size, code_size, reloc_size, const_size
 _TPU5_OFS_FLAGS = 0x24
 _TPU5_HEADER_MIN = 0x26
@@ -67,13 +66,11 @@ _TPU5_HEADER_MIN = 0x26
 # two bytes shorter than TPU9: the table offsets match TPU9, while the size
 # tuple and flags word are each shifted back by one word.
 _TPU6_OFS_CODE_BLOCKS = 0x0E
-_TPU6_OFS_CONST_BLOCKS = 0x10
 _TPU6_OFS_SIZES = 0x1A  # sym_size, code_size, const_size, reloc_size, vmt_size
 _TPU6_OFS_FLAGS = 0x28
 _TPU6_HEADER_MIN = 0x2A
 
 _TPU9_OFS_CODE_BLOCKS = 0x0E
-_TPU9_OFS_CONST_BLOCKS = 0x10
 _TPU9_OFS_SIZES = 0x1C  # sym_size, code_size, const_size, reloc_size, vmt_size
 _TPU9_OFS_FLAGS = 0x2A
 _TPU9_HEADER_MIN = 0x2C
@@ -86,7 +83,6 @@ REF_OFFSET = 1    # 16-bit offset
 REF_SEGMENT = 2   # 16-bit segment
 REF_POINTER = 3   # 32-bit far pointer (offset:segment)
 _REF_LENGTH = {REF_RELATIVE: 2, REF_OFFSET: 2, REF_SEGMENT: 2, REF_POINTER: 4}
-_REF_NAME = {REF_RELATIVE: "relative", REF_OFFSET: "offset", REF_SEGMENT: "segment", REF_POINTER: "pointer"}
 
 _RELOC_RECORD_SIZE = 8
 _BLOCK_RECORD_SIZE = 8

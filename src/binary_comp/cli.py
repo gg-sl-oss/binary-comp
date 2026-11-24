@@ -10,7 +10,6 @@ from pathlib import Path
 
 from binary_comp.analyzers.calls import CallsOptions, check_calls, format_calls_summary
 from binary_comp.analyzers.data import (
-    DataOptions,
     compare_address,
     compare_global_data,
     find_missing_globals,
@@ -857,7 +856,6 @@ def run_data(args) -> int:
             target.rebuilt_exe,
             target.map_path,
             globals_source,
-            DataOptions(section_name=args.section, verbose=args.verbose),
             extra_type_sizes=extra_type_sizes,
             relocated_address_map=build_source_function_address_map(
                 target, config.get("globals", {}).get("function_addresses", {})),

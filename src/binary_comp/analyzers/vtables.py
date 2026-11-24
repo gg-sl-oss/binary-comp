@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import glob
 import os
 import re
 import struct
@@ -300,38 +299,6 @@ def build_signature_key(method_name: str, params: str, is_const: bool = False) -
     if is_const:
         key += " const"
     return key
-
-
-def parse_method_declaration(decl: str, class_name: str) -> dict[str, Any] | None:
-    original = decl
-    decl = strip_inline_comments(decl).strip()
-    if not decl:
-        return None
-    decl = re.sub(r"\s+", " ", decl)
-    if "{" in decl:
-        decl = decl.split("{", 1)[0].strip()
-    if decl.endswith(";"):
-        decl = decl[:-1].strip()
-
-    match = re.match(
-        r"^(?P<virtual>virtual\s+)?(?P<prefix>.*?)(?P<name>~?\w+)\s*"
-        r"\((?P<params>[^()]*)\)\s*(?P<const>const\b)?(?:\s*=\s*0)?$",
-        decl,
-    )
-    if not match:
-        return None
-
-    method_name = match.group("name")
-    params = match.group("params") or ""
-    is_const = bool(match.group("const"))
-    return {
-        "class_name": class_name,
-        "method_name": method_name,
-        "signature_key": build_signature_key(method_name, params, is_const),
-        "is_virtual": bool(match.group("virtual")),
-        "slot_index": extract_slot_index(original),
-        "display_name": f"{class_name}::{method_name}",
-    }
 
 
 def parse_source_tree(path: str):

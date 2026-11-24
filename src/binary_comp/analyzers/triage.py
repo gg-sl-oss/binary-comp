@@ -35,7 +35,6 @@ from dataclasses import dataclass, field
 from binary_comp.analyzers.function_compare import (
     FunctionCompareError,
     FunctionComparer,
-    load_disassembly_policy,
     maybe_build,
 )
 from binary_comp.analyzers.report import disassembly_path
@@ -366,7 +365,6 @@ def generate_triage_report(
         canonical_aliases=options.canonical_aliases,
         signature_overloads=options.signature_overloads,
     )
-    load_disassembly_policy(target)
     groups_by_source = load_source_groups(target.source_dirs, target.map_skip, target.source_excludes)
 
     rows: list[TriageRow] = []

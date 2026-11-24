@@ -364,12 +364,3 @@ def load_project_target(config_path: str | os.PathLike[str], target: str) -> tup
         project_target = _target_from_legacy(config, target)
     configure_preprocessor(project_target.preprocessor)
     return config, project_target
-
-
-def resolve_path(path: str | None, base: str | os.PathLike[str] | None = None) -> str | None:
-    if path is None:
-        return None
-    candidate = Path(path)
-    if candidate.is_absolute() or base is None:
-        return str(candidate)
-    return str(Path(base) / candidate)

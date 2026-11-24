@@ -24,10 +24,6 @@ class FunctionGroup:
     rebuilt_symbol: str
 
 
-def iter_cpp_files(source_dirs: tuple[str, ...], map_skip: str | None = None):
-    yield from iter_cpp_files_excluding(source_dirs, map_skip)
-
-
 def iter_cpp_files_excluding(
     source_dirs: tuple[str, ...],
     map_skip: str | None = None,

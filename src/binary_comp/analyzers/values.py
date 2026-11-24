@@ -969,73 +969,6 @@ def same_effective_register_immediate(
     return False
 
 
-def shifted_memory_base_match_count(
-    compiled_instrs: list[Instruction],
-    original_instrs: list[Instruction],
-    ci: int,
-    oi: int,
-    operand_idx: int,
-    delta: int,
-    policy: VerifierPolicy,
-    include_stack_locals: bool = False,
-) -> int:
-    if delta == 0:
-        return 0
-
-    count = 0
-    for rel in range(-policy.nearby_window, policy.nearby_window + 1):
-        c_idx = ci + rel
-        o_idx = oi + rel
-        if c_idx < 0 or o_idx < 0 or c_idx >= len(compiled_instrs) or o_idx >= len(original_instrs):
-            continue
-
-        compiled = compiled_instrs[c_idx]
-        original = original_instrs[o_idx]
-        if compiled.mnemonic != original.mnemonic:
-            continue
-        if operand_idx >= len(compiled.operands) or operand_idx >= len(original.operands):
-            continue
-
-        c_op = compiled.operands[operand_idx]
-        o_op = original.operands[operand_idx]
-        if c_op.kind != "mem" or o_op.kind != "mem":
-            continue
-        if not comparable_lhs(c_op, o_op, policy, include_stack_locals):
-            continue
-        if not member_displacement(c_op.disp, policy) or not member_displacement(o_op.disp, policy):
-            continue
-        if c_op.disp - o_op.disp != delta:
-            continue
-
-        count += 1
-
-    return count
-
-
-def equivalent_shifted_memory_base(
-    compiled_instrs: list[Instruction],
-    original_instrs: list[Instruction],
-    ci: int,
-    oi: int,
-    operand_idx: int,
-    c_op: Operand,
-    o_op: Operand,
-    policy: VerifierPolicy,
-    include_stack_locals: bool = False,
-) -> bool:
-    delta = c_op.disp - o_op.disp
-    return shifted_memory_base_match_count(
-        compiled_instrs,
-        original_instrs,
-        ci,
-        oi,
-        operand_idx,
-        delta,
-        policy,
-        include_stack_locals,
-    ) >= 3
-
-
 def register_has_literal_pointer_origin(
     instrs: list[Instruction],
     idx: int,
@@ -1154,12 +1087,6 @@ def equivalent_shifted_literal_pointer_base(
         delta,
         policy,
     ) >= 2
-
-
-def next_mnemonic(instrs: list[Instruction], idx: int) -> str | None:
-    if idx + 1 >= len(instrs):
-        return None
-    return instrs[idx + 1].mnemonic
 
 
 def next_instruction(instrs: list[Instruction], idx: int) -> Instruction | None:
