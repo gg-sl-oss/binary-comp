@@ -17,7 +17,7 @@ pytest.importorskip("tree_sitter")
 pytest.importorskip("tree_sitter_cpp")
 
 
-def test_vtable_checker_on_generated_fixture_project(tmp_path):
+def _fixture_project(tmp_path, *, rdata_section=False, configured_range=True):
     original = tmp_path / "original.exe"
     function_bytes = b"\xC7\x01" + struct.pack("<I", DATA_VA) + b"\xC3"
     write_tiny_pe(
@@ -25,6 +25,9 @@ def test_vtable_checker_on_generated_fixture_project(tmp_path):
         function_bytes=function_bytes,
         data_overrides={0: struct.pack("<I", TEXT_VA + 0x10)},
     )
+    if rdata_section:
+        image = original.read_bytes()
+        original.write_bytes(image.replace(b".data\0\0\0", b".rdata\0\0", 1))
 
     (tmp_path / "rebuilt.exe").write_bytes(original.read_bytes())
     (tmp_path / "rebuilt.map").write_text("", encoding="utf-8")
@@ -70,12 +73,16 @@ Sample::~Sample() {}
             },
             "vtables": {
                 "rdata_range": [hex(DATA_VA), hex(DATA_VA + 0x20)]
-            },
+            } if configured_range else {},
         }),
         encoding="utf-8",
     )
 
-    config, target = load_project_target(config_path, "full")
+    return load_project_target(config_path, "full")
+
+
+def test_vtable_checker_on_generated_fixture_project(tmp_path):
+    config, target = _fixture_project(tmp_path)
     summary = check_vtables(config, target, VtableOptions())
 
     assert summary.totals["slots"] == 1
@@ -83,6 +90,15 @@ Sample::~Sample() {}
     assert summary.totals["missing_real"] == 0
     assert summary.totals["symbol_mismatch"] == 0
     assert not summary.has_failures
+
+
+def test_explicit_rdata_range_overrides_the_rdata_section(tmp_path):
+    config, target = _fixture_project(tmp_path, rdata_section=True, configured_range=False)
+
+    assert check_vtables(config, target, VtableOptions()).totals["slots"] == 1
+    # A range that excludes the vtable used to be ignored because .rdata exists.
+    excluded = VtableOptions(rdata_min=DATA_VA + 0x100, rdata_max=DATA_VA + 0x200)
+    assert check_vtables(config, target, excluded).totals["slots"] == 0
 
 
 def test_declared_parent_without_vtable_info_is_not_invalid(tmp_path):
