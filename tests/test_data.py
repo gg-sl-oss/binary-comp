@@ -10,14 +10,16 @@ from binary_comp.analyzers.data import (
     find_missing_globals,
     format_comparison,
     format_missing_globals,
+    load_data_globals,
 )
 from binary_comp.analyzers.globals import GlobalDecl as AuditGlobalDecl, build_rebuilt_layout_issues
 from binary_comp.core.mapfile import parse_encoded_address_symbols
-from binary_comp.source.globals import parse_globals_source
 
 
 def test_parse_global_declarations(fixture_root):
-    globals_list = parse_globals_source(str(fixture_root / "src" / "globals.cpp"))
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
+    globals_list = load_data_globals(str(fixture_root / "src" / "globals.cpp"))
 
     assert [item.name for item in globals_list] == [
         "g_Text_00402000",
@@ -31,6 +33,8 @@ def test_parse_global_declarations(fixture_root):
 
 
 def test_parse_pointer_declarations_with_adjacent_star(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     globals_path = tmp_path / "globals.cpp"
     globals_path.write_text(
         "char *g_Buffer_00402020 = 0;\n"
@@ -39,13 +43,15 @@ def test_parse_pointer_declarations_with_adjacent_star(tmp_path):
         encoding="utf-8",
     )
 
-    globals_list = parse_globals_source(str(globals_path))
+    globals_list = load_data_globals(str(globals_path))
 
     assert [item.address for item in globals_list] == [0x402020, 0x402024, 0x402028]
     assert [item.size for item in globals_list] == [4, 4, 4]
 
 
 def test_parse_global_declarations_with_multiline_initializer(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     globals_path = tmp_path / "globals.cpp"
     globals_path.write_text(
         "int g_Table_00402030[3] = {\n"
@@ -56,7 +62,7 @@ def test_parse_global_declarations_with_multiline_initializer(tmp_path):
         encoding="utf-8",
     )
 
-    globals_list = parse_globals_source(str(globals_path))
+    globals_list = load_data_globals(str(globals_path))
 
     assert len(globals_list) == 1
     assert globals_list[0].address == 0x402030
@@ -64,6 +70,8 @@ def test_parse_global_declarations_with_multiline_initializer(tmp_path):
 
 
 def test_compare_global_data_matches(fixture_root, sample_binaries):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     original, rebuilt = sample_binaries
 
     summary = compare_global_data(
@@ -81,6 +89,8 @@ def test_compare_global_data_matches(fixture_root, sample_binaries):
 
 
 def test_compare_global_data_reports_mismatch(fixture_root, tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     from conftest import write_tiny_pe
 
     original = tmp_path / "original.exe"
@@ -103,6 +113,8 @@ def test_compare_global_data_reports_mismatch(fixture_root, tmp_path):
 
 
 def test_compare_global_data_finds_named_globals_in_the_map(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     from conftest import write_tiny_pe
 
     original = tmp_path / "original.exe"
@@ -124,6 +136,8 @@ def test_compare_global_data_finds_named_globals_in_the_map(tmp_path):
 
 
 def test_compare_global_data_matches_anonymous_string_pointer(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     from conftest import DATA_VA, write_tiny_pe
 
     original = tmp_path / "original.exe"
@@ -157,6 +171,8 @@ def test_compare_global_data_matches_anonymous_string_pointer(tmp_path):
 
 
 def test_compare_global_data_finds_unmapped_contiguous_static_data(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     from conftest import DATA_VA, write_tiny_pe
 
     original = tmp_path / "original.exe"
@@ -567,6 +583,8 @@ def test_rebuilt_layout_check_ignores_rebased_indexed_array_access(tmp_path):
 
 
 def test_find_missing_globals_reports_uncovered_dwords(fixture_root, tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     from conftest import write_tiny_pe
 
     original = tmp_path / "original.exe"
@@ -583,6 +601,8 @@ def test_find_missing_globals_reports_uncovered_dwords(fixture_root, tmp_path):
 
 
 def test_parse_global_declarations_use_trailing_address_run(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
     globals_path = tmp_path / "globals.cpp"
     globals_path.write_text(
         'char s_cfg_031568_dat_00402040[15] = "cfg\\\\031568.dat";\n'
@@ -590,6 +610,35 @@ def test_parse_global_declarations_use_trailing_address_run(tmp_path):
         encoding="utf-8",
     )
 
-    globals_list = parse_globals_source(str(globals_path))
+    globals_list = load_data_globals(str(globals_path))
 
     assert [item.address for item in globals_list] == [0x402040, 0x402050]
+
+
+def test_load_data_globals_sizes(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
+    globals_path = tmp_path / "globals.cpp"
+    globals_path.write_text(
+        "extern const short g_Map_00402000[2 * 3] = {1, 2, 3, 4, 5, 6};\n"
+        "char g_Throttle = 1;    /* DAT_00402010 */\n"
+        "void *g_Table_00402020[3] = {\n    0,\n    0,\n    0,\n};\n"
+        "LPDIRECTDRAW g_DirectDraw_00402030;\n"
+        "int g_Named_00402040[COUNT];\n"
+        "int g_Open_00402050[] = {1, 2};\n",
+        encoding="utf-8",
+    )
+
+    sizes = {decl.name: decl.size for decl in load_data_globals(str(globals_path), constants={"COUNT": 5})}
+
+    # The first three shapes were missed by the old regex parser.
+    assert sizes == {
+        "g_Map_00402000": 12,
+        "g_Throttle": 1,
+        "g_Table_00402020": 12,
+        "g_DirectDraw_00402030": 4,  # unknown type: pointer-sized
+        "g_Named_00402040": 20,
+        "g_Open_00402050": 4,  # [] without a string counts once, as before
+    }
+    with pytest.raises(ValueError, match="unknown size of global g_DirectDraw_00402030"):
+        load_data_globals(str(globals_path), constants={"COUNT": 5}, unknown_element_size=None)

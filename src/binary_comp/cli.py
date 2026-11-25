@@ -40,7 +40,7 @@ from binary_comp.analyzers.global_access import (
     check_global_accesses,
     format_global_access_summary,
 )
-from binary_comp.analyzers.globals import GlobalsAuditOptions, audit_globals, format_report
+from binary_comp.analyzers.globals import GlobalsAuditOptions, audit_globals, format_report, parse_defines
 from binary_comp.analyzers.omf import (
     OmfCompareError,
     compare_omf_config_function,
@@ -774,6 +774,8 @@ def run_data(args) -> int:
     config, target = load_project_target(args.config, args.target)
     globals_source = require_globals_source(args.globals_source or target.globals_source)
     extra_type_sizes = extract_globals_type_sizes(config)
+    # The same #define constants the globals audit uses, for named dimensions.
+    constants = parse_defines([target.globals_header, *target.define_headers])
     if args.find_missing:
         skip_ranges = parse_skip_ranges(args.skip_ranges)
         summary = find_missing_globals(
@@ -784,6 +786,7 @@ def run_data(args) -> int:
             max_address=args.max_address,
             skip_ranges=skip_ranges,
             extra_type_sizes=extra_type_sizes,
+            constants=constants,
         )
         print(format_missing_globals(summary))
         return 0
@@ -806,6 +809,7 @@ def run_data(args) -> int:
         extra_type_sizes=extra_type_sizes,
         relocated_address_map=build_source_function_address_map(
             target, config.get("globals", {}).get("function_addresses", {})),
+        constants=constants,
     )
 
     print(format_comparison(summary, verbose=args.verbose))
