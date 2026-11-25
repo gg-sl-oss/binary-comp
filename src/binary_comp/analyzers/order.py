@@ -24,7 +24,7 @@ from binary_comp.analyzers.report import (
 from binary_comp.config import ProjectTarget
 from binary_comp.core.mapfile import parse_msvc_map_by_obj
 from binary_comp.core.pe import EXECUTABLE_FLAG, PEImage
-from binary_comp.source.functions import load_source_groups
+from binary_comp.source.functions import load_source_groups, object_member_name, source_object_name
 
 
 WRITABLE_FLAG = 0x80000000
@@ -302,8 +302,7 @@ def _rebuilt_object_starts(target: ProjectTarget) -> dict[str, int]:
     for object_name, entries in parse_msvc_map_by_obj(target.map_path).items():
         if not entries:
             continue
-        basename = re.split(r"[:\\/]", object_name)[-1]
-        starts[basename.lower()] = min(entry.va for entry in entries)
+        starts[object_member_name(object_name).lower()] = min(entry.va for entry in entries)
     return starts
 
 
@@ -352,7 +351,7 @@ def _source_summaries(
             for previous, following in zip(definitions, definitions[1:])
             if following.address < previous.address
         )
-        object_name = os.path.splitext(source_file)[0].lower() + ".obj"
+        object_name = source_object_name(source_file).lower()
         summaries.append(SourceOrderSummary(
             source_path=source_path,
             source_file=source_file,
