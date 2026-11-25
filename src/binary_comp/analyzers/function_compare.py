@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 from binary_comp.build import maybe_build
 from binary_comp.config import ConfigError, ProjectTarget
@@ -214,25 +215,31 @@ def switch_jump_targets(
 
 
 def instruction_size(image: PEImage, instr: Instruction) -> int:
+    """The encoded length of ``instr``.
+
+    Decoded instructions carry their size; only hand-built ones (size 0)
+    are decoded again from the image.
+    """
+    if instr.size:
+        return instr.size
+    data = image.read(instr.address, 15)
+    if not data:
+        return 0
+    decoded = next(_decoder().disasm(data, instr.address, count=1), None)
+    return decoded.size if decoded is not None else 0
+
+
+@lru_cache(maxsize=1)
+def _decoder():
     try:
         from capstone import CS_ARCH_X86, CS_MODE_32, Cs
     except ImportError as exc:
         raise RuntimeError("capstone is required") from exc
-
-    data = image.read(instr.address, 15)
-    if not data:
-        return 0
-    md = Cs(CS_ARCH_X86, CS_MODE_32)
-    decoded = next(md.disasm(data, instr.address), None)
-    return decoded.size if decoded is not None else 0
+    return Cs(CS_ARCH_X86, CS_MODE_32)
 
 
 def has_fallthrough(image: PEImage, instr: Instruction) -> bool:
-    if instr.mnemonic == "ret":
-        return False
-    if instr.mnemonic == "jmp":
-        return False
-    if instr.mnemonic in {"int", "int3"}:
+    if instr.mnemonic in {"ret", "jmp", "int", "int3"}:
         return False
     return instruction_size(image, instr) != 0
 
@@ -278,8 +285,7 @@ def reachable_instruction_indices(
 
         if has_fallthrough(image, instr) and index + 1 < len(instrs):
             next_instr = instrs[index + 1]
-            size = instruction_size(image, instr)
-            if size and next_instr.address == instr.address + size:
+            if next_instr.address == instr.address + instruction_size(image, instr):
                 pending.append(index + 1)
 
     return reachable
