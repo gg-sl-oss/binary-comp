@@ -20,6 +20,7 @@ from binary_comp.core.disasm import (
 from binary_comp.core.mapfile import function_starts_from_map, parse_msvc_map_by_obj
 from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import (
+    DELETING_DTOR_SYMBOL_RE,
     canonical_function_name,
     symbol_matches,
     symbol_patterns_for_function,
@@ -553,12 +554,12 @@ class FunctionComparer:
             return ordered
 
         class_leaf = class_name.rsplit("::", 1)[-1]
-        variant_prefixes = (f"??_G{class_leaf}@@", f"??_E{class_leaf}@@")
         for entries in self.map_entries().values():
             for entry in entries:
                 if entry.va in seen:
                     continue
-                if any(entry.symbol.startswith(prefix) for prefix in variant_prefixes):
+                deleting = DELETING_DTOR_SYMBOL_RE.match(entry.symbol)
+                if deleting and deleting.group("cls") == class_leaf:
                     seen.add(entry.va)
                     ordered.append(entry.va)
         return ordered
