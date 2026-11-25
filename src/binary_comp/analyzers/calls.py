@@ -12,6 +12,7 @@ from typing import Any
 
 from binary_comp.build import maybe_build
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
+from binary_comp.core.asm_listing import function_lines
 from binary_comp.core.disasm import Instruction, disassemble_reachable_x86, unsigned32
 from binary_comp.core.ghidra import find_export, iter_exports, read_export_header
 from binary_comp.core.mapfile import parse_msvc_map_symbols
@@ -303,41 +304,10 @@ def compiled_instruction_fingerprint(
     Operand values remain in the fingerprint; only source-local stack names and
     generated jump-label numbers are normalized.
     """
-    try:
-        with open(asm_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except OSError:
-        return ()
-
     body: list[str] = []
-    current_index = -1
-    in_function = False
-    for line in lines:
-        stripped = line.strip()
-        if not in_function:
-            if "PROC" not in stripped:
-                continue
-            matched = False
-            if "; " in stripped:
-                comment = stripped.split("; ", 1)[1].strip()
-                if comment.endswith(", COMDAT"):
-                    comment = comment[:-len(", COMDAT")].strip()
-                matched = comment == function_name
-            if not matched:
-                symbol = stripped.split(None, 1)[0]
-                matched = normalize_compiled(symbol, signature_names) == function_name
-            if not matched:
-                continue
-            current_index += 1
-            if current_index != occurrence_index:
-                continue
-            in_function = True
-            continue
-
-        if re.match(r"\S+\s+ENDS\b", stripped, re.IGNORECASE):
-            break
-        if re.search(r"\bENDP\b", stripped):
-            break
+    for stripped in function_lines(
+        asm_path, function_name, occurrence_index, signature_names=signature_names
+    ):
         code = stripped.split(";", 1)[0].strip()
         if not code or code.endswith(":"):
             continue
@@ -930,47 +900,11 @@ def extract_calls_from_compiled(
     signature_names: frozenset[str] = frozenset(),
 ) -> list[str]:
     calls = []
-    try:
-        with open(asm_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except OSError:
-        return calls
-
-    func_lines = []
-    current_index = -1
-    in_func = False
-    for line in lines:
-        stripped = line.strip()
-        if not in_func:
-            if "PROC" not in stripped:
-                continue
-            matched = False
-            if "; " in stripped:
-                comment = stripped.split("; ", 1)[1].strip()
-                if comment.endswith(", COMDAT"):
-                    comment = comment[:-len(", COMDAT")].strip()
-                matched = comment == function_name
-            if not matched:
-                symbol = stripped.split(None, 1)[0]
-                matched = normalize_compiled(symbol, signature_names) == function_name
-            if not matched:
-                continue
-            current_index += 1
-            if current_index != occurrence_index:
-                continue
-            in_func = True
-            continue
-
-        if re.match(r"\S+\s+ENDS\b", stripped, re.IGNORECASE):
-            # With synchronous C++ exception handling MSVC emits the normal
-            # function in _TEXT, closes that segment, then emits unwind
-            # funclets in text$x before writing the final ENDP.  Those funclet
-            # calls are metadata-driven cleanup paths rather than call sites in
-            # the function body being compared.
-            break
-        if re.search(r"\bENDP\b", stripped):
-            break
-        func_lines.append(stripped)
+    # Stops at ENDS, so EH unwind funclets in text$x are left out; see
+    # core/asm_listing.py.
+    func_lines = function_lines(
+        asm_path, function_name, occurrence_index, signature_names=signature_names
+    )
 
     if not func_lines:
         return calls
