@@ -5,8 +5,8 @@ import os
 import re
 import struct
 from bisect import bisect_right
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
     from capstone import Cs, CS_ARCH_X86, CS_MODE_32
@@ -59,9 +59,22 @@ BASE_TYPE_SIZES = {
     "double": 8,
 }
 
-TYPE_SIZES = dict(BASE_TYPE_SIZES)
-STRUCT_FORMATS = {}
-SYMBOLIC_STRUCT_ARRAYS = {}
+
+
+@dataclass(frozen=True)
+class GlobalTypes:
+    """Type information for sizing and encoding globals.
+
+    Built from a project's ``globals`` configuration by ``globals_types`` and
+    passed to every function that needs it.
+    """
+
+    sizes: Mapping[str, int] = field(default_factory=lambda: dict(BASE_TYPE_SIZES))
+    struct_formats: Mapping[str, str] = field(default_factory=dict)
+    symbolic_struct_arrays: Mapping[str, list] = field(default_factory=dict)
+
+
+DEFAULT_GLOBAL_TYPES = GlobalTypes()
 
 
 @dataclass
@@ -657,41 +670,44 @@ def runtime_initializer_copy_map(globals_config: Dict) -> Dict[int, int]:
     return parse_int_value_map(globals_config.get("runtime_initializer_copies", {}))
 
 
-def configure_globals(globals_config: Dict) -> Dict[int, int]:
-    global TYPE_SIZES, STRUCT_FORMATS, SYMBOLIC_STRUCT_ARRAYS
-
-    TYPE_SIZES = dict(BASE_TYPE_SIZES)
+def globals_types(globals_config: Dict) -> GlobalTypes:
+    """The type sizes, struct formats and symbolic struct arrays a project configures."""
+    sizes = dict(BASE_TYPE_SIZES)
     for name, size in globals_config.get("type_sizes", {}).items():
-        TYPE_SIZES[name] = parse_int(size, f"globals.type_sizes.{name}")
+        sizes[name] = parse_int(size, f"globals.type_sizes.{name}")
 
-    STRUCT_FORMATS = {}
+    struct_formats = {}
     for name, spec in globals_config.get("struct_formats", {}).items():
         aliases = spec.get("aliases") or [name]
         for alias in aliases:
-            STRUCT_FORMATS[normalize_type(alias)] = spec["format"]
+            struct_formats[normalize_type(alias)] = spec["format"]
 
-    SYMBOLIC_STRUCT_ARRAYS = {}
+    symbolic_struct_arrays = {}
     for name, spec in globals_config.get("symbolic_struct_arrays", {}).items():
         aliases = spec.get("aliases") or [name]
         for alias in aliases:
-            SYMBOLIC_STRUCT_ARRAYS[normalize_type(alias)] = spec.get("fields", [])
+            symbolic_struct_arrays[normalize_type(alias)] = spec.get("fields", [])
 
+    return GlobalTypes(sizes, struct_formats, symbolic_struct_arrays)
+
+
+def runtime_seeded_global_map(globals_config: Dict) -> Dict[int, int]:
     return parse_int_value_map(globals_config.get("runtime_seeded_globals", {}))
 
 
-def base_type_size(type_text: str) -> Optional[int]:
+def base_type_size(type_text: str, *, types: GlobalTypes) -> Optional[int]:
     normalized = normalize_type(type_text)
-    if normalized in TYPE_SIZES:
-        return TYPE_SIZES[normalized]
+    if normalized in types.sizes:
+        return types.sizes[normalized]
     if "*" in normalized:
         return 6 if re.search(r"\b__far\b", normalized) else 4
     if normalized.startswith("struct "):
-        return TYPE_SIZES.get(normalized)
+        return types.sizes.get(normalized)
     return None
 
 
-def infer_size(decl: GlobalDecl, constants: Dict[str, int], next_addr: Optional[int]) -> Optional[int]:
-    elem = base_type_size(decl.type_text)
+def infer_size(decl: GlobalDecl, constants: Dict[str, int], next_addr: Optional[int], *, types: GlobalTypes) -> Optional[int]:
+    elem = base_type_size(decl.type_text, types=types)
     if elem is None:
         return next_addr - decl.address if next_addr and next_addr > decl.address else None
     count = 1
@@ -740,7 +756,7 @@ def strip_outer_casts(expr: str) -> str:
         expr = m.group(1).strip()
 
 
-def scalar_bytes(type_text: str, initializer: str, constants: Dict[str, int]) -> Optional[bytes]:
+def scalar_bytes(type_text: str, initializer: str, constants: Dict[str, int], *, types: GlobalTypes) -> Optional[bytes]:
     init = strip_outer_casts(initializer.rstrip(";"))
     normalized = normalize_type(type_text)
     if init.startswith("'"):
@@ -764,7 +780,7 @@ def scalar_bytes(type_text: str, initializer: str, constants: Dict[str, int]) ->
             val = eval_int_expr(init, constants)
         except Exception:
             return None
-    size = base_type_size(type_text)
+    size = base_type_size(type_text, types=types)
     if size == 1:
         return struct.pack("<B", val & 0xFF)
     if size == 2:
@@ -816,11 +832,11 @@ def split_top_level_commas(text: str) -> List[str]:
     return out
 
 
-def numeric_array_bytes(decl: GlobalDecl, constants: Dict[str, int]) -> Tuple[Optional[bytes], str]:
+def numeric_array_bytes(decl: GlobalDecl, constants: Dict[str, int], *, types: GlobalTypes) -> Tuple[Optional[bytes], str]:
     if decl.initializer is None:
         return None, ""
     init = strip_comments(decl.initializer).strip()
-    if init.startswith('"') and base_type_size(decl.type_text) == 1:
+    if init.startswith('"') and base_type_size(decl.type_text, types=types) == 1:
         data = parse_c_string_bytes(init) + b"\0"
         return data, ""
     if not (init.startswith("{") and init.endswith("}")):
@@ -828,7 +844,7 @@ def numeric_array_bytes(decl: GlobalDecl, constants: Dict[str, int]) -> Tuple[Op
     if "{" in init[1:-1] or "&" in init:
         return None, "nested/symbolic initializer"
     body = init[1:-1]
-    elem_size = base_type_size(decl.type_text)
+    elem_size = base_type_size(decl.type_text, types=types)
     if elem_size not in (1, 2, 4):
         return None, "unsupported element type"
     out = bytearray()
@@ -861,11 +877,11 @@ def pack_struct_format(fmt: str, values: List[int]) -> Optional[bytes]:
         return None
 
 
-def struct_bytes(decl: GlobalDecl, constants: Dict[str, int]) -> Tuple[Optional[bytes], str]:
+def struct_bytes(decl: GlobalDecl, constants: Dict[str, int], *, types: GlobalTypes) -> Tuple[Optional[bytes], str]:
     if decl.initializer is None:
         return None, ""
     typ = normalize_type(decl.type_text)
-    fmt = STRUCT_FORMATS.get(typ)
+    fmt = types.struct_formats.get(typ)
     if fmt is None:
         return None, "unsupported struct initializer"
     init = strip_comments(decl.initializer).strip()
@@ -888,7 +904,7 @@ def struct_bytes(decl: GlobalDecl, constants: Dict[str, int]) -> Tuple[Optional[
 def resolve_symbolic_pointer(expr: str,
                              constants: Dict[str, int],
                              data_symbols: Dict[str, GlobalDecl],
-                             function_symbols: Dict[str, int]) -> Optional[int]:
+                             function_symbols: Dict[str, int], *, types: GlobalTypes) -> Optional[int]:
     expr = strip_outer_casts(expr).strip()
     if expr in ("0", "NULL"):
         return 0
@@ -911,7 +927,7 @@ def resolve_symbolic_pointer(expr: str,
                 index = eval_int_expr(m.group(2), constants)
             except Exception:
                 return None
-        elem_size = base_type_size(decl.type_text)
+        elem_size = base_type_size(decl.type_text, types=types)
         if elem_size is None:
             return None
         return decl.address + index * elem_size
@@ -944,11 +960,11 @@ def resolve_symbolic_scalar_initializer(expr: str,
 def symbolic_struct_array_bytes(decl: GlobalDecl,
                                 constants: Dict[str, int],
                                 data_symbols: Dict[str, GlobalDecl],
-                                function_symbols: Dict[str, int]) -> Tuple[Optional[bytes], str]:
+                                function_symbols: Dict[str, int], *, types: GlobalTypes) -> Tuple[Optional[bytes], str]:
     if decl.initializer is None:
         return None, ""
     typ = normalize_type(decl.type_text)
-    field_specs = SYMBOLIC_STRUCT_ARRAYS.get(typ)
+    field_specs = types.symbolic_struct_arrays.get(typ)
     if field_specs is None:
         return None, ""
     init = strip_comments(decl.initializer).strip()
@@ -964,19 +980,19 @@ def symbolic_struct_array_bytes(decl: GlobalDecl,
         if len(fields) != len(field_specs):
             return None, f"unexpected {typ} field count"
         try:
-            for field, spec in zip(fields, field_specs):
+            for field_text, spec in zip(fields, field_specs):
                 kind = spec.get("kind")
                 if kind == "uint8":
-                    value = eval_int_expr(strip_outer_casts(field), constants)
+                    value = eval_int_expr(strip_outer_casts(field_text), constants)
                     out.extend(struct.pack("<B", value & 0xFF))
                 elif kind == "uint16":
-                    value = eval_int_expr(strip_outer_casts(field), constants)
+                    value = eval_int_expr(strip_outer_casts(field_text), constants)
                     out.extend(struct.pack("<H", value & 0xFFFF))
                 elif kind == "uint32":
-                    value = eval_int_expr(strip_outer_casts(field), constants)
+                    value = eval_int_expr(strip_outer_casts(field_text), constants)
                     out.extend(struct.pack("<I", value & 0xFFFFFFFF))
                 elif kind == "pointer":
-                    ptr = resolve_symbolic_pointer(field, constants, data_symbols, function_symbols)
+                    ptr = resolve_symbolic_pointer(field_text, constants, data_symbols, function_symbols, types=types)
                     if ptr is None:
                         return None, f"unresolved {typ} pointer"
                     out.extend(struct.pack("<I", ptr & 0xFFFFFFFF))
@@ -990,12 +1006,12 @@ def symbolic_struct_array_bytes(decl: GlobalDecl,
 def symbolic_pointer_bytes(decl: GlobalDecl,
                            constants: Dict[str, int],
                            data_symbols: Dict[str, GlobalDecl],
-                           function_symbols: Dict[str, int]) -> Tuple[Optional[bytes], str]:
+                           function_symbols: Dict[str, int], *, types: GlobalTypes) -> Tuple[Optional[bytes], str]:
     if decl.initializer is None or decl.dims:
         return None, ""
     if "*" not in normalize_type(decl.type_text) and decl.initializer.strip() not in function_symbols:
         return None, ""
-    ptr = resolve_symbolic_pointer(decl.initializer, constants, data_symbols, function_symbols)
+    ptr = resolve_symbolic_pointer(decl.initializer, constants, data_symbols, function_symbols, types=types)
     if ptr is None:
         return None, "unresolved symbolic pointer"
     return struct.pack("<I", ptr & 0xFFFFFFFF), ""
@@ -1004,7 +1020,7 @@ def symbolic_pointer_bytes(decl: GlobalDecl,
 def symbolic_pointer_array_bytes(decl: GlobalDecl,
                                  constants: Dict[str, int],
                                  data_symbols: Dict[str, GlobalDecl],
-                                 function_symbols: Dict[str, int]) -> Tuple[Optional[bytes], str]:
+                                 function_symbols: Dict[str, int], *, types: GlobalTypes) -> Tuple[Optional[bytes], str]:
     if decl.initializer is None or not decl.dims or "*" not in normalize_type(decl.type_text):
         return None, ""
     init = strip_comments(decl.initializer).strip()
@@ -1017,7 +1033,7 @@ def symbolic_pointer_array_bytes(decl: GlobalDecl,
     for token in split_top_level_commas(body):
         if not token:
             continue
-        ptr = resolve_symbolic_pointer(token, constants, data_symbols, function_symbols)
+        ptr = resolve_symbolic_pointer(token, constants, data_symbols, function_symbols, types=types)
         if ptr is None:
             return None, "unresolved symbolic pointer"
         out.extend(struct.pack("<I", ptr & 0xFFFFFFFF))
@@ -1027,7 +1043,7 @@ def symbolic_pointer_array_bytes(decl: GlobalDecl,
 def infer_source_bytes(decl: GlobalDecl,
                        constants: Dict[str, int],
                        data_symbols: Dict[str, GlobalDecl],
-                       function_symbols: Dict[str, int]) -> None:
+                       function_symbols: Dict[str, int], *, types: GlobalTypes) -> None:
     if decl.size is None:
         return
     if not decl.has_initializer:
@@ -1050,21 +1066,21 @@ def infer_source_bytes(decl: GlobalDecl,
             except (ValueError, SyntaxError):
                 pass
     if not decl.dims:
-        data = scalar_bytes(decl.type_text, decl.initializer, constants)
+        data = scalar_bytes(decl.type_text, decl.initializer, constants, types=types)
         if data is not None:
             decl.source_bytes = data.ljust(decl.size, b"\0")[:decl.size]
             return
-        data, note = symbolic_pointer_bytes(decl, constants, data_symbols, function_symbols)
+        data, note = symbolic_pointer_bytes(decl, constants, data_symbols, function_symbols, types=types)
         if data is not None:
             decl.source_bytes = data.ljust(decl.size, b"\0")[:decl.size]
             return
-    data, note = struct_bytes(decl, constants)
+    data, note = struct_bytes(decl, constants, types=types)
     if data is None:
-        data, note = symbolic_struct_array_bytes(decl, constants, data_symbols, function_symbols)
+        data, note = symbolic_struct_array_bytes(decl, constants, data_symbols, function_symbols, types=types)
     if data is None:
-        data, note = symbolic_pointer_array_bytes(decl, constants, data_symbols, function_symbols)
+        data, note = symbolic_pointer_array_bytes(decl, constants, data_symbols, function_symbols, types=types)
     if data is None:
-        data, note = numeric_array_bytes(decl, constants)
+        data, note = numeric_array_bytes(decl, constants, types=types)
     if data is not None:
         decl.source_bytes = data.ljust(decl.size, b"\0")[:decl.size]
     else:
@@ -1747,35 +1763,35 @@ def parse_int_literal(text: str) -> Optional[int]:
         return None
 
 
-def access_size_from_pointer_casts(prefix: str) -> Optional[int]:
+def access_size_from_pointer_casts(prefix: str, *, types: GlobalTypes) -> Optional[int]:
     matches = list(POINTER_CAST_RE.finditer(prefix))
     if not matches:
         return None
     for match in matches:
-        size = base_type_size(match.group(1))
+        size = base_type_size(match.group(1), types=types)
         if size is not None and size != 1:
             return size
-    return base_type_size(matches[-1].group(1))
+    return base_type_size(matches[-1].group(1), types=types)
 
 
-def access_size_from_pointer_cast_before_address(text: str, address_of_start: int) -> Optional[int]:
+def access_size_from_pointer_cast_before_address(text: str, address_of_start: int, *, types: GlobalTypes) -> Optional[int]:
     prefix = text[max(0, address_of_start - 120):address_of_start]
     match = POINTER_CAST_BEFORE_ADDRESS_RE.search(prefix)
     if match is None:
         return None
-    size = base_type_size(match.group(1))
+    size = base_type_size(match.group(1), types=types)
     if size is None or size <= 1:
         return None
     return size
 
 
-def layout_use_is_provably_in_bounds(text: str, match, decl: GlobalDecl) -> bool:
+def layout_use_is_provably_in_bounds(text: str, match, decl: GlobalDecl, *, types: GlobalTypes) -> bool:
     if decl.size is None or decl.size <= 0:
         return False
 
     prefix = text[max(0, match.start() - 160):match.start()]
     tail = statement_tail(text, match.end())[:160]
-    access_size = access_size_from_pointer_casts(prefix) or base_type_size(decl.type_text) or 1
+    access_size = access_size_from_pointer_casts(prefix, types=types) or base_type_size(decl.type_text, types=types) or 1
 
     subscript_match = re.match(r"\s*\)*\s*\[\s*({})\s*\]".format(INT_LITERAL_RE.pattern), tail)
     if subscript_match:
@@ -1797,7 +1813,7 @@ def layout_use_is_provably_in_bounds(text: str, match, decl: GlobalDecl) -> bool
     return False
 
 
-def array_decay_use_is_layout_sensitive(text: str, match, decl: GlobalDecl) -> bool:
+def array_decay_use_is_layout_sensitive(text: str, match, decl: GlobalDecl, *, types: GlobalTypes) -> bool:
     if not decl.dims or decl.size is None or decl.size <= 0:
         return False
     if line_is_preprocessor_directive(text, match.start()):
@@ -1821,7 +1837,7 @@ def array_decay_use_is_layout_sensitive(text: str, match, decl: GlobalDecl) -> b
     subscript_match = re.match(r"\s*\[\s*({})\s*\]".format(INT_LITERAL_RE.pattern), tail)
     if subscript_match:
         index = parse_int_literal(subscript_match.group(1))
-        elem_size = base_type_size(decl.type_text) or 1
+        elem_size = base_type_size(decl.type_text, types=types) or 1
         if index is None:
             return False
         offset = index * elem_size
@@ -1830,12 +1846,12 @@ def array_decay_use_is_layout_sensitive(text: str, match, decl: GlobalDecl) -> b
         return False
 
     if re.match(r"\s*(?:\+|-)", tail):
-        return constant_offset_crosses_decl(text, match, decl)
+        return constant_offset_crosses_decl(text, match, decl, types=types)
 
     assigned_var = assigned_variable_for_array_decay(text, match.start())
     if assigned_var is None:
         return False
-    return assigned_array_decay_crosses_decl(text, match, decl, assigned_var)
+    return assigned_array_decay_crosses_decl(text, match, decl, assigned_var, types=types)
 
 
 def assigned_variable_for_array_decay(text: str, pos: int) -> Optional[str]:
@@ -1868,15 +1884,15 @@ def first_array_dim(decl: GlobalDecl) -> Optional[int]:
     return parse_int_literal(decl.dims[0])
 
 
-def array_decay_stride_unit_size(text: str, match, decl: GlobalDecl) -> Optional[int]:
+def array_decay_stride_unit_size(text: str, match, decl: GlobalDecl, *, types: GlobalTypes) -> Optional[int]:
     prefix = text[max(0, match.start() - 160):match.start()]
-    cast_size = access_size_from_pointer_casts(prefix)
+    cast_size = access_size_from_pointer_casts(prefix, types=types)
     if cast_size is not None:
         return cast_size
     first_dim = first_array_dim(decl)
     if first_dim is not None and first_dim > 0 and decl.size is not None:
         return decl.size // first_dim
-    return base_type_size(decl.type_text)
+    return base_type_size(decl.type_text, types=types)
 
 
 def pointer_stride_elements_after(text: str, pos: int, name: str) -> Optional[tuple[int, int]]:
@@ -1928,14 +1944,14 @@ def constant_loop_count_for_pointer_stride(text: str, start: int, stride_pos: in
     return None
 
 
-def assigned_array_decay_crosses_decl(text: str, match, decl: GlobalDecl, name: str) -> bool:
+def assigned_array_decay_crosses_decl(text: str, match, decl: GlobalDecl, name: str, *, types: GlobalTypes) -> bool:
     if decl.size is None or decl.size <= 0:
         return False
     stride = pointer_stride_elements_after(text, match.end(), name)
     if stride is None:
         return False
     stride_pos, stride_elems = stride
-    unit_size = array_decay_stride_unit_size(text, match, decl)
+    unit_size = array_decay_stride_unit_size(text, match, decl, types=types)
     if unit_size is None or unit_size <= 0:
         return False
     count = constant_loop_count_for_pointer_stride(text, match.end(), stride_pos)
@@ -1944,12 +1960,12 @@ def assigned_array_decay_crosses_decl(text: str, match, decl: GlobalDecl, name: 
     return count * stride_elems * unit_size > decl.size
 
 
-def array_address_use_is_layout_sensitive(text: str, match, decl: GlobalDecl) -> bool:
+def array_address_use_is_layout_sensitive(text: str, match, decl: GlobalDecl, *, types: GlobalTypes) -> bool:
     tail = statement_tail(text, match.end())[:160]
     subscript_match = re.match(r"\s*\)*\s*\[\s*({})\s*\]".format(INT_LITERAL_RE.pattern), tail)
     if subscript_match:
         index = parse_int_literal(subscript_match.group(1))
-        elem_size = base_type_size(decl.type_text) or 1
+        elem_size = base_type_size(decl.type_text, types=types) or 1
         if index is None or decl.size is None or decl.size <= 0:
             return False
         offset = index * elem_size
@@ -1959,14 +1975,14 @@ def array_address_use_is_layout_sensitive(text: str, match, decl: GlobalDecl) ->
         return not (0 <= offset <= decl.size)
     if re.match(r"\s*\)*\s*\[", tail):
         return False
-    return constant_offset_crosses_decl(text, match, decl)
+    return constant_offset_crosses_decl(text, match, decl, types=types)
 
 
-def constant_offset_crosses_decl(text: str, match, decl: GlobalDecl) -> bool:
+def constant_offset_crosses_decl(text: str, match, decl: GlobalDecl, *, types: GlobalTypes) -> bool:
     tail = statement_tail(text, match.end())[:160]
     if not re.match(r"\s*\)*\s*(?:\+|-)\s*{}\b".format(INT_LITERAL_RE.pattern), tail):
         return False
-    return not layout_use_is_provably_in_bounds(text, match, decl)
+    return not layout_use_is_provably_in_bounds(text, match, decl, types=types)
 
 
 def layout_use_context(text: str, start: int, end: int) -> str:
@@ -1983,7 +1999,7 @@ def layout_use_context(text: str, start: int, end: int) -> str:
 def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
                                       source_excludes: Sequence[str],
                                       decls_by_name: dict[str, GlobalDecl],
-                                      ignored_paths: Sequence[str] = ()) -> dict[str, LayoutSensitiveUse]:
+                                      ignored_paths: Sequence[str] = (), *, types: GlobalTypes) -> dict[str, LayoutSensitiveUse]:
     ignored = {os.path.abspath(path) for path in ignored_paths if path}
     uses: dict[str, LayoutSensitiveUse] = {}
     if not decls_by_name:
@@ -2014,7 +2030,7 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
             decl = decls_by_name.get(name)
             if decl is None or name in uses:
                 continue
-            cast_size = access_size_from_pointer_cast_before_address(masked, match.start())
+            cast_size = access_size_from_pointer_cast_before_address(masked, match.start(), types=types)
             if cast_size is not None and decl.size is not None and decl.size > 0 and cast_size > decl.size:
                 uses[name] = LayoutSensitiveUse(
                     name=name,
@@ -2024,7 +2040,7 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
                 )
                 continue
             if decl.dims:
-                if not array_address_use_is_layout_sensitive(masked, match, decl):
+                if not array_address_use_is_layout_sensitive(masked, match, decl, types=types):
                     continue
                 uses[name] = LayoutSensitiveUse(
                     name=name,
@@ -2036,7 +2052,7 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
             tail = statement_tail(masked, match.end())
             if not is_layout_sensitive_address_tail(tail):
                 continue
-            if layout_use_is_provably_in_bounds(masked, match, decl):
+            if layout_use_is_provably_in_bounds(masked, match, decl, types=types):
                 continue
             uses[name] = LayoutSensitiveUse(
                 name=name,
@@ -2049,7 +2065,7 @@ def find_layout_sensitive_global_uses(source_dirs: Sequence[str],
                 continue
             pattern = re.compile(r"(?<![A-Za-z0-9_]){}(?![A-Za-z0-9_])".format(re.escape(name)))
             for match in pattern.finditer(masked):
-                if not array_decay_use_is_layout_sensitive(masked, match, decl):
+                if not array_decay_use_is_layout_sensitive(masked, match, decl, types=types):
                     continue
                 uses[name] = LayoutSensitiveUse(
                     name=name,
@@ -2483,7 +2499,7 @@ def build_rebuilt_layout_issues(decls: List[GlobalDecl],
                                 source_excludes: Sequence[str] = (),
                                 ignored_source_paths: Sequence[str] = (),
                                 asm_dir: str = "",
-                                segment_bases: dict[int, int] | None = None) -> List[Issue]:
+                                segment_bases: dict[int, int] | None = None, *, types: GlobalTypes = DEFAULT_GLOBAL_TYPES) -> List[Issue]:
     if code_dir and not isinstance(code_dir, (str, bytes, os.PathLike)):
         if not source_dirs:
             source_dirs = code_dir
@@ -2551,7 +2567,7 @@ def build_rebuilt_layout_issues(decls: List[GlobalDecl],
             source_dirs,
             source_excludes,
             layout_candidate_decls,
-            ignored_source_paths,
+            ignored_source_paths, types=types
         )
         for name, use in layout_uses.items():
             decl = layout_candidate_decls.get(name)
@@ -2592,7 +2608,7 @@ def build_issues(pe: PEImage,
                  include_code_globals: bool,
                  include_symbolic: bool,
                  check_source_order: bool,
-                 source_order_all: bool) -> List[Issue]:
+                 source_order_all: bool, *, types: GlobalTypes) -> List[Issue]:
     decls = [decl for decl in decls if not is_cpp_vtable_placeholder(decl.name)]
     header_decls = [decl for decl in header_decls if not is_cpp_vtable_placeholder(decl.name)]
 
@@ -2604,10 +2620,10 @@ def build_issues(pe: PEImage,
 
     data_symbols = {decl.name: decl for decl in decls}
     for decl in decls:
-        decl.size = infer_size(decl, constants, next_by_addr[id(decl)])
+        decl.size = infer_size(decl, constants, next_by_addr[id(decl)], types=types)
         if decl.size and decl.size > 0x10000:
             decl.size = None
-        infer_source_bytes(decl, constants, data_symbols, function_symbols)
+        infer_source_bytes(decl, constants, data_symbols, function_symbols, types=types)
 
     issues: List[Issue] = []
     if check_source_order:
@@ -2693,7 +2709,7 @@ def build_issues(pe: PEImage,
             continue
         if in_any_range(decl.address, source_ranges):
             continue
-        size = infer_size(decl, constants, None) or 4
+        size = infer_size(decl, constants, None, types=types) or 4
         if size > 0x1000:
             size = 32
         original = pe.read(decl.address, size)
@@ -2896,7 +2912,8 @@ def resolve_audit_inputs(config: dict[str, Any], target: ProjectTarget, options:
 def audit_globals(config: dict[str, Any], target: ProjectTarget, options: GlobalsAuditOptions) -> GlobalsAuditSummary:
     inputs = resolve_audit_inputs(config, target, options)
     globals_config = get_section(config, "globals")
-    runtime_seeded_globals = configure_globals(globals_config)
+    types = globals_types(globals_config)
+    runtime_seeded_globals = runtime_seeded_global_map(globals_config)
     runtime_initializer_copies = runtime_initializer_copy_map(globals_config)
     constants = parse_defines([inputs.globals_h, *inputs.define_headers])
     pe = load_image(inputs.exe, relocate=True)
@@ -2916,7 +2933,7 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
                           runtime_seeded_globals,
                           runtime_initializer_copies,
                           inputs.min_address, inputs.include_code_globals, inputs.include_symbolic,
-                          not inputs.no_source_order, inputs.source_order_all)
+                          not inputs.no_source_order, inputs.source_order_all, types=types)
     if inputs.check_rebuilt_layout:
         rebuilt = load_image(target.rebuilt_exe) if isinstance(pe, LEImage) else None
         issues.extend(build_rebuilt_layout_issues(
@@ -2928,7 +2945,7 @@ def audit_globals(config: dict[str, Any], target: ProjectTarget, options: Global
             inputs.source_excludes,
             (inputs.globals_source, inputs.globals_h or ""),
             asm_dir=inputs.asm_dir,
-            segment_bases=rebuilt.segment_bases() if isinstance(rebuilt, LEImage) else None,
+            segment_bases=rebuilt.segment_bases() if isinstance(rebuilt, LEImage) else None, types=types
         ))
         issues.sort(key=lambda x: (x.address, x.category, x.name))
     if inputs.max_address is not None:

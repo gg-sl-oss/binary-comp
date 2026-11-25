@@ -18,8 +18,8 @@ from binary_comp.analyzers.calls import (
 from binary_comp.analyzers.globals import (
     GlobalDecl,
     auto_global_ranges,
-    configure_globals,
     get_section,
+    globals_types,
     infer_size,
     parse_defines,
     parse_globals_source,
@@ -134,8 +134,7 @@ def access_kinds_for_operand(mnemonic: str, operand_index: int) -> tuple[str, ..
 
 
 def configured_global_decls(config: dict[str, Any], target: ProjectTarget) -> list[GlobalDecl]:
-    globals_config = get_section(config, "globals")
-    configure_globals(globals_config)
+    types = globals_types(get_section(config, "globals"))
     constants = parse_defines([target.globals_header, *target.define_headers])
     decls = parse_globals_source(target.globals_source)
     by_addr = sorted(decls, key=lambda decl: decl.address)
@@ -143,7 +142,7 @@ def configured_global_decls(config: dict[str, Any], target: ProjectTarget) -> li
     for index, decl in enumerate(by_addr):
         next_by_addr[id(decl)] = by_addr[index + 1].address if index + 1 < len(by_addr) else None
     for decl in decls:
-        decl.size = infer_size(decl, constants, next_by_addr[id(decl)])
+        decl.size = infer_size(decl, constants, next_by_addr[id(decl)], types=types)
         if decl.size and decl.size > 0x10000:
             decl.size = None
     return decls

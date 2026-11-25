@@ -252,14 +252,14 @@ def compare_global_data(
     address_map = parse_encoded_address_map(map_path)
     if isinstance(original, LEImage) or os.path.isdir(globals_path):
         from binary_comp.analyzers.globals import (
-            configure_globals, infer_size, parse_globals_source as parse_declarations,
+            globals_types, infer_size, parse_globals_source as parse_declarations,
             rebuilt_symbol_indexes, rebuilt_va_for_decl,
         )
-        configure_globals({"type_sizes": extra_type_sizes or {}})
+        types = globals_types({"type_sizes": extra_type_sizes or {}})
         declarations = parse_declarations(globals_path)
         globals_list = []
         for decl in declarations:
-            size = infer_size(decl, {"NULL": 0}, None)
+            size = infer_size(decl, {"NULL": 0}, None, types=types)
             if size is None or size <= 0:
                 raise ValueError(f"unknown size of global {decl.name}; configure globals.type_sizes")
             globals_list.append(GlobalDecl(decl.address, size, decl.name, decl.type_text,

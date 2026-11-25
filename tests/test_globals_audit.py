@@ -5,7 +5,7 @@ import struct
 import pytest
 
 from binary_comp.analyzers.globals import (
-    GlobalDecl, GlobalsAuditOptions, audit_globals, configure_globals, format_report,
+    GlobalDecl, GlobalsAuditOptions, audit_globals, format_report, globals_types,
     symbolic_struct_array_bytes,
 )
 from binary_comp.config import ProjectTarget
@@ -415,19 +415,16 @@ def test_globals_audit_reports_rebuilt_asm_access_spanning_source_global(tmp_pat
 
 
 def test_symbolic_struct_array_packs_byte_fields():
-    configure_globals({"symbolic_struct_arrays": {"Entry": {"fields": [
+    types = globals_types({"symbolic_struct_arrays": {"Entry": {"fields": [
         {"kind": "uint8"}, {"kind": "uint16"}, {"kind": "uint8"},
     ]}}})
-    try:
-        decl = GlobalDecl(
-            address=0x1000, name="entries", statement="", line=1, type_text="Entry",
-            dims=["2"], has_initializer=True,
-            initializer="{{1, 0x203, 0x1ff}, {(unsigned char)4, 5, 6}}",
-        )
+    decl = GlobalDecl(
+        address=0x1000, name="entries", statement="", line=1, type_text="Entry",
+        dims=["2"], has_initializer=True,
+        initializer="{{1, 0x203, 0x1ff}, {(unsigned char)4, 5, 6}}",
+    )
 
-        data, note = symbolic_struct_array_bytes(decl, {}, {}, {})
-    finally:
-        configure_globals({})
+    data, note = symbolic_struct_array_bytes(decl, {}, {}, {}, types=types)
 
     assert note == ""
     assert data == bytes([1, 0x03, 0x02, 0xFF, 4, 5, 0, 6])
