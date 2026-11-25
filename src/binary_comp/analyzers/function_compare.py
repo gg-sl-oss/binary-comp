@@ -13,6 +13,8 @@ from binary_comp.core.disasm import (
     Instruction,
     disassemble_x86,
     has_msvc_seh_frame,
+    is_indexed_jump_table_operand,
+    read_jump_table,
     unsigned32,
 )
 from binary_comp.core.mapfile import function_starts_from_map, parse_msvc_map_by_obj
@@ -191,27 +193,14 @@ def switch_jump_targets(
         return []
 
     operand = instr.operands[0]
-    if operand.kind != "mem":
-        return []
-    if operand.base or not operand.index or operand.scale != 4:
+    if not is_indexed_jump_table_operand(operand):
         return []
 
+    # MSVC places the table after the function's code, inside its range.
     table = unsigned32(operand.disp)
     if not (func_start <= table < func_end):
         return []
-
-    targets = []
-    cursor = table
-    while cursor + 4 <= func_end:
-        raw = image.read(cursor, 4)
-        if raw is None or len(raw) != 4:
-            break
-        target = int.from_bytes(raw, "little")
-        if not (func_start <= target < func_end):
-            break
-        targets.append(target)
-        cursor += 4
-    return targets
+    return read_jump_table(image, table, func_start, func_end, table_end=func_end, max_entries=None)
 
 
 def instruction_size(image: PEImage, instr: Instruction) -> int:

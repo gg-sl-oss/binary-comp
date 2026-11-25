@@ -277,3 +277,24 @@ def test_reachable_disassembly_follows_shifted_base_jump_table(tmp_path):
 
     assert addresses.isdisjoint(range(table, case_zero))
     assert {case_zero, case_zero + 1, case_one, case_one + 1, default, default + 2} <= addresses
+
+
+def test_read_jump_table_stops_at_range_table_end_and_entry_limit():
+    from binary_comp.core.disasm import read_jump_table
+
+    class Image:
+        def __init__(self, base, data):
+            self.base, self.data = base, data
+
+        def read(self, address, size):
+            offset = address - self.base
+            chunk = self.data[offset:offset + size]
+            return chunk if offset >= 0 and len(chunk) == size else None
+
+    entries = [0x401000, 0x401010, 0x401020, 0x999999]
+    image = Image(0x401100, b"".join(struct.pack("<I", entry) for entry in entries))
+
+    assert read_jump_table(image, 0x401100, 0x401000, 0x401100) == entries[:3]
+    assert read_jump_table(image, 0x401100, 0x401000, 0x401100, table_end=0x401108) == entries[:2]
+    assert read_jump_table(image, 0x401100, 0x401000, 0x401100, max_entries=1) == entries[:1]
+    assert read_jump_table(image, 0x401200, 0x401000, 0x401100) == []
