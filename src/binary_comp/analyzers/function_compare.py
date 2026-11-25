@@ -613,54 +613,8 @@ class FunctionComparer:
         disassembled_code_path: str,
         build: bool = True,
     ) -> FunctionComparison:
-        maybe_build(self.target, build)
-
-        original_addr = parse_original_address(disassembled_code_path)
-        if original_addr is None:
-            raise FunctionCompareError("could not determine original function address")
-
-        if self.rebuilt_address(function_name, original_addr) is None:
-            raise FunctionCompareError("function not found in linker map")
-
-        for path, label in (
-            (self.target.original_exe, "original executable"),
-            (self.target.rebuilt_exe, "rebuilt executable"),
-            (self.target.map_path, "linker map"),
-        ):
-            if not os.path.exists(path):
-                raise FunctionCompareError(f"missing {label}: {path}")
-
-        original_image = self.pe_image(self.target.original_exe)
-        rebuilt_image = self.pe_image(self.target.rebuilt_exe)
-
-        original = disassemble_exported_function(
-            original_image,
-            disassembled_code_path,
-            original_addr,
-            self.max_bytes,
-            self.padding_mnemonics,
-        )
-        if not original.instructions:
-            raise FunctionCompareError("could not disassemble original bytes")
-
-        best = self._best_candidate(
-            function_name,
-            original_addr,
-            instruction_mnemonics(original.instructions),
-            rebuilt_image,
-        )
-        if best is None:
-            raise FunctionCompareError("function found but could not disassemble rebuilt bytes")
-        rebuilt_addr, rebuilt, similarity = best
-
-        return FunctionComparison(
-            function_name=function_name,
-            original_addr=original_addr,
-            rebuilt_addr=rebuilt_addr,
-            similarity=similarity,
-            rebuilt=rebuilt,
-            original=original,
-        )
+        """Compare one rebuilt function against one original export."""
+        return self.compare_combined(function_name, [disassembled_code_path], build)
 
     def compare_combined(
         self,
@@ -668,7 +622,7 @@ class FunctionComparer:
         disassembled_code_paths: list[str],
         build: bool = True,
     ) -> FunctionComparison:
-        """Compare one rebuilt function against several original pieces at once.
+        """Compare one rebuilt function against one or more original pieces.
 
         MSVC SEH functions are exported by Ghidra as multiple contiguous chunks
         (a short FS-frame prologue followed by the body), and the source carries
