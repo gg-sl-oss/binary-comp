@@ -6,6 +6,8 @@ import os
 import re
 from dataclasses import dataclass
 
+from binary_comp.core.symbols import encoded_address
+
 
 @dataclass(frozen=True)
 class MapEntry:
@@ -38,9 +40,6 @@ FUNCTION_LINE_RE = re.compile(
 )
 MAP_SYMBOL_LINE_RE = re.compile(
     r"\s*[0-9a-fA-F]{4}:[0-9a-fA-F]+\s+(\S+)\s+([0-9a-fA-F]{8})(?:\s+(\S+))?"
-)
-ENCODED_ADDRESS_SUFFIX_RE = re.compile(
-    r"_([0-9a-fA-F]{6,8})(?:@@\S*)?$"
 )
 ANY_SEGMENT_SYMBOL_LINE_RE = re.compile(
     r"^\s*(?P<segment>[0-9a-fA-F]{4}):[0-9a-fA-F]+\s+(?P<symbol>\S+)\s+(?P<va>[0-9a-fA-F]{8})(?P<rest>.*)$"
@@ -128,11 +127,11 @@ def parse_encoded_address_symbols(map_path: str) -> list[EncodedAddressMapEntry]
             if not line_match:
                 continue
             symbol = line_match.group(1)
-            address_match = ENCODED_ADDRESS_SUFFIX_RE.search(symbol)
-            if not address_match:
+            original_va = encoded_address(symbol)
+            if original_va is None:
                 continue
             entries.append(EncodedAddressMapEntry(
-                original_va=int(address_match.group(1), 16),
+                original_va=original_va,
                 rebuilt_va=int(line_match.group(2), 16),
                 symbol=symbol,
                 object_file=line_match.group(3),

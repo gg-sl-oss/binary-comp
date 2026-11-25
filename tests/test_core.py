@@ -43,3 +43,14 @@ def test_pe_image_reads_sections_and_strings(sample_binaries):
     assert image.read(TEXT_VA, 1) == b"\xB8"
     assert image.c_string_at(DATA_VA) == "hello"
     assert image.read(DATA_VA + 0x18, 4) == b"\0\0\0\0"
+
+
+def test_encoded_address_reads_the_trailing_address_of_a_name():
+    from binary_comp.core.symbols import encoded_address
+
+    assert encoded_address("g_Table_00402000") == 0x402000
+    assert encoded_address("DAT_402000") == 0x402000
+    assert encoded_address("?g_Table_00402000@@3PAHA") == 0x402000
+    assert encoded_address("s_cfg_031568_dat_0046bdd0") == 0x46BDD0
+    assert encoded_address("g_Table_00402000_old") is None
+    assert encoded_address("g_Count") is None

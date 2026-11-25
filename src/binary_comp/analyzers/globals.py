@@ -17,6 +17,7 @@ except ImportError:
     X86_OP_IMM = X86_OP_MEM = X86_OP_REG = None
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
+from binary_comp.core.symbols import encoded_address
 from binary_comp.core.mapfile import parse_encoded_address_symbols, parse_msvc_map_symbols, parse_watcom_map_symbols
 from binary_comp.core.image import load_image
 from binary_comp.core.le import LEImage
@@ -252,13 +253,6 @@ def strip_comments(text: str) -> str:
     return text
 
 
-def address_from_encoded_suffix(name: str) -> Optional[int]:
-    m = re.search(r"_([0-9A-Fa-f]{8}|[0-9A-Fa-f]{6})$", name)
-    if not m:
-        return None
-    return int(m.group(1), 16)
-
-
 def address_from_comments(text: str) -> Optional[int]:
     comments = re.findall(r"/\*.*?\*/|//[^\n]*", text, flags=re.S)
     if not comments:
@@ -276,7 +270,7 @@ def address_from_comments(text: str) -> Optional[int]:
 
 
 def address_for_declaration(name: str, leading: str, statement: str, trailing: str) -> Optional[int]:
-    address = address_from_encoded_suffix(name)
+    address = encoded_address(name)
     if address is not None:
         return address
     # The declaration's own annotation outranks a preceding module comment.
@@ -573,12 +567,12 @@ def parse_code_globals(path: str) -> List[CodeGlobal]:
         if m:
             kind = m.group(1) + m.group(2)
             name = m.group(3)
-            addr_m = re.search(r"_([0-9A-Fa-f]{8}|[0-9A-Fa-f]{6})\b", name)
-            if not addr_m:
+            address = encoded_address(name)
+            if address is None:
                 continue
             size = {"undefined1": 1, "undefined2": 2, "undefined4": 4, "undefined8": 8,
                     "byte": 1, "word": 2, "dword": 4, "pointer": 4}.get(kind, 4)
-            out.append(CodeGlobal(int(addr_m.group(1), 16), name, size, lineno, kind))
+            out.append(CodeGlobal(address, name, size, lineno, kind))
     return out
 
 

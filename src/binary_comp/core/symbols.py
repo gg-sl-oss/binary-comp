@@ -172,6 +172,18 @@ DTOR_SYMBOL_RE = re.compile(r"^\?\?1(?P<cls>\w+)@@")
 CTOR_SYMBOL_RE = re.compile(r"^\?\?0(?P<cls>\w+)@@")
 METHOD_SYMBOL_RE = re.compile(r"^\?(?P<method>\w+)@(?P<cls>\w+)@@")
 
+# An original address kept at the end of a name: g_Table_00402000, or the
+# decorated ?g_Table_00402000@@3PAHA. Six to eight hex digits after an
+# underscore.
+ENCODED_ADDRESS_SUFFIX_RE = re.compile(r"_([0-9A-Fa-f]{6,8})(?:@@\S*)?$")
+
+
+def encoded_address(name: str) -> int | None:
+    """The original address a name carries as its suffix, or None."""
+    match = ENCODED_ADDRESS_SUFFIX_RE.search(name)
+    return int(match.group(1), 16) if match else None
+
+
 PURECALL_SYMBOLS = frozenset({"_purecall", "__purecall"})
 
 
