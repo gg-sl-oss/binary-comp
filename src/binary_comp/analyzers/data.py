@@ -14,12 +14,6 @@ from binary_comp.source.globals import GlobalDecl, parse_globals_source
 
 
 @dataclass(frozen=True)
-class DataOptions:
-    section_name: str = ".data"
-    verbose: bool = False
-
-
-@dataclass(frozen=True)
 class GlobalComparison:
     global_decl: GlobalDecl
     rebuilt_address: int | None
@@ -250,11 +244,9 @@ def compare_global_data(
     rebuilt_path: str,
     map_path: str,
     globals_path: str,
-    options: DataOptions | None = None,
     extra_type_sizes: dict[str, int] | None = None,
     relocated_address_map: dict[int, int] | None = None,
 ) -> DataCompareSummary:
-    options = options or DataOptions()
     original = load_image(original_path, relocate=True)
     rebuilt = load_image(rebuilt_path, relocate=True)
     address_map = parse_encoded_address_map(map_path)

@@ -24,22 +24,6 @@ def split_name_parameters(name: str) -> str:
     return name.split("(", 1)[0]
 
 
-def decode_msvc_pointer_class_tokens(encoded: str) -> list[str]:
-    """Class names of the ``PAV<class>@@`` pointer tokens in a mangled tail.
-
-    Numeric back-references (``PAV2@@``) repeat the previous token.
-    """
-    tokens: list[str] = []
-    for match in re.finditer(r"PAV([^@]+)@@", encoded):
-        token = match.group(1)
-        if token.isdigit():
-            if tokens:
-                tokens.append(tokens[-1])
-            continue
-        tokens.append(token.replace("@", "::"))
-    return tokens
-
-
 def _decode_msvc_named_type(encoded: str, pos: int, previous_class_tokens: list[str]) -> tuple[str | None, int]:
     if pos >= len(encoded) or encoded[pos] not in "UV":
         return None, pos

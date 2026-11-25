@@ -150,9 +150,6 @@ class LEImage:
         obj = self.object_for_va(address)
         return None if obj is None else obj.base + obj.size
 
-    def maps(self, address: int) -> bool:
-        return self.object_for_va(address) is not None
-
     def c_string_at(self, address: int, predicate=None, limit: int = 512) -> str | None:
         obj = self.object_for_va(address)
         if obj is None:

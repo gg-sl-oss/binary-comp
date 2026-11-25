@@ -3,7 +3,6 @@ from __future__ import annotations
 import struct
 
 from binary_comp.analyzers.data import (
-    DataOptions,
     compare_address,
     compare_global_data,
     find_missing_globals,
@@ -70,7 +69,6 @@ def test_compare_global_data_matches(fixture_root, sample_binaries):
         str(rebuilt),
         str(fixture_root / "rebuilt.map"),
         str(fixture_root / "src" / "globals.cpp"),
-        DataOptions(),
     )
 
     assert summary.global_count == 3
@@ -93,7 +91,6 @@ def test_compare_global_data_reports_mismatch(fixture_root, tmp_path):
         str(rebuilt),
         str(fixture_root / "rebuilt.map"),
         str(fixture_root / "src" / "globals.cpp"),
-        DataOptions(),
     )
 
     assert summary.matches == 1

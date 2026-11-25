@@ -15,7 +15,7 @@ from binary_comp.config import ConfigError, ProjectTarget, parse_int
 from binary_comp.core.disasm import Instruction, disassemble_reachable_x86, unsigned32
 from binary_comp.core.mapfile import parse_msvc_map_symbols
 from binary_comp.core.pe import PEImage
-from binary_comp.core.symbols import decode_msvc_pointer_class_tokens, normalize_compiled
+from binary_comp.core.symbols import normalize_compiled
 from binary_comp.source.cpp import parse_source_function_groups, parse_source_function_markers
 
 
@@ -932,11 +932,6 @@ def merge_call_lists_max(primary: list[str | int], supplemental: list[str | int]
     for target, count in supplemental_counts.items():
         merged.extend([target] * max(0, count - primary_counts.get(target, 0)))
     return merged
-
-
-# decode_msvc_pointer_class_tokens / normalize_compiled now live in
-# binary_comp.core.symbols (shared with the source-to-map matcher); re-exported
-# above via the module import so existing references keep working.
 
 
 def extract_calls_from_compiled(

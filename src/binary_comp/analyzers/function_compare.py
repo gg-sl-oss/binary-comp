@@ -94,29 +94,6 @@ def parse_original_address(disassembled_code_path: str) -> int | None:
     return None
 
 
-def instruction_count_from_disassembly(disassembled_code_path: str) -> int | None:
-    try:
-        with open(disassembled_code_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.read().splitlines()[3:]
-    except OSError:
-        return None
-
-    count = 0
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.endswith(":"):
-            continue
-        if stripped.startswith(";"):
-            continue
-        mnemonic = stripped.split()[0].lower()
-        if mnemonic in {"db", "dd", "dw", "npad"}:
-            continue
-        count += 1
-    return count or None
-
-
 def is_instruction_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
@@ -419,7 +396,6 @@ def disassemble_exported_function(
             [start],
             max_bytes,
             padding_mnemonics,
-            instruction_count=instruction_count_from_disassembly(disassembled_code_path),
         )
 
     instructions: list[Instruction] = []

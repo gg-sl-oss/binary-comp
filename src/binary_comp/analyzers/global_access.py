@@ -195,7 +195,6 @@ REGISTER_ALIASES = {
     "esp": "esp", "sp": "esp",
 }
 
-REGISTER_NAMES = frozenset(REGISTER_ALIASES)
 CALL_CLOBBERED_REGISTERS = frozenset(("eax", "ecx", "edx"))
 
 
@@ -405,13 +404,6 @@ def extract_original_global_accesses(
                     accesses.append(access_token("ADDR", symbol))
         update_original_register_bases(mnemonic, operands, register_bases)
     return accesses
-
-
-def plain_global_name(symbol: str) -> str | None:
-    match = re.match(r"\?([A-Za-z_][A-Za-z0-9_]*)@@", symbol)
-    if match:
-        return match.group(1)
-    return None
 
 
 def parse_asm_offset(value: str | None) -> int:
