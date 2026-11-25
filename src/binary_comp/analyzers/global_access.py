@@ -538,13 +538,9 @@ def asm_function_lines(
     occurrence_index: int,
     signature_names: frozenset[str],
 ) -> list[str]:
-    return function_lines(
-        asm_path,
-        function_name,
-        occurrence_index,
-        signature_names=signature_names,
-        stop_at_segment_end=False,
-    )
+    # Stops at ENDS like calls does: EH unwind funclets emitted in text$x
+    # before ENDP are not part of the function body.
+    return function_lines(asm_path, function_name, occurrence_index, signature_names=signature_names)
 
 
 def extract_compiled_global_accesses(
