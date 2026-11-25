@@ -15,7 +15,14 @@ from binary_comp.analyzers.function_compare import (
     mnemonic_similarity,
 )
 from binary_comp.analyzers.report import SimilarityReport, SimilarityReportOptions, SimilarityReportRow
-from binary_comp.config import ProjectTarget
+from binary_comp.config import (
+    ProjectTarget,
+    config_int,
+    optional_string,
+    require_string,
+    resolve_config_path,
+)
+from binary_comp.core.binary import masked_count, masked_mismatches, relocation_mask
 from binary_comp.core.disasm import Instruction, disassemble_raw
 from binary_comp.core.le import LEImage
 
@@ -91,15 +98,11 @@ class OmfComparison:
 
     @property
     def masked_count(self) -> int:
-        return sum(1 for value in self.mask if value == 0)
+        return masked_count(self.mask)
 
     @property
     def mismatches(self) -> tuple[int, ...]:
-        return tuple(
-            index
-            for index, (left, right, mask) in enumerate(zip(self.original, self.rebuilt, self.mask))
-            if mask and left != right
-        )
+        return masked_mismatches(self.original, self.rebuilt, self.mask)
 
     @property
     def matches(self) -> bool:
@@ -416,15 +419,7 @@ def select_ledata(
 
 
 def build_mask(size: int, fixups: tuple[OmfFixup, ...], object_offset: int = 0) -> bytes:
-    mask = bytearray([0xFF] * size)
-    for fixup in fixups:
-        start = fixup.offset - object_offset
-        end = start + fixup.length
-        if end <= 0 or start >= size:
-            continue
-        for index in range(max(0, start), min(size, end)):
-            mask[index] = 0
-    return bytes(mask)
+    return relocation_mask(size, ((fixup.offset, fixup.length) for fixup in fixups), object_offset)
 
 
 def build_segment_mask(
@@ -435,17 +430,8 @@ def build_segment_mask(
     object_offset: int = 0,
 ) -> bytes:
     """Build a mask for a window in one assembled OMF segment image."""
-    mask = bytearray([0xFF] * size)
-    for fixup in fixups:
-        if fixup.segment_index != segment_index:
-            continue
-        start = fixup.offset - object_offset
-        end = start + fixup.length
-        if end <= 0 or start >= size:
-            continue
-        for index in range(max(0, start), min(size, end)):
-            mask[index] = 0
-    return bytes(mask)
+    spans = ((fixup.offset, fixup.length) for fixup in fixups if fixup.segment_index == segment_index)
+    return relocation_mask(size, spans, object_offset)
 
 
 def compare_omf_to_original(
@@ -743,46 +729,6 @@ def compare_omf_spec(spec: OmfCompareSpec) -> FunctionComparison:
     )
 
 
-def parse_config_int(value: Any, label: str, *, required: bool = True) -> int | None:
-    if value in (None, ""):
-        if required:
-            raise OmfCompareError(f"missing required configuration value: {label}")
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value, 0)
-        except ValueError:
-            pass
-    raise OmfCompareError(f"{label} must be an integer or integer string")
-
-
-def require_config_string(config: dict[str, Any], key: str, label: str) -> str:
-    value = config.get(key)
-    if not isinstance(value, str) or not value:
-        raise OmfCompareError(f"missing required configuration value: {label}")
-    return value
-
-
-def optional_config_string(config: dict[str, Any], key: str) -> str | None:
-    value = config.get(key)
-    if value in (None, ""):
-        return None
-    if not isinstance(value, str):
-        raise OmfCompareError(f"{key} must be a string")
-    return value
-
-
-def resolve_config_path(config_path: str | Path, path: str | None) -> str | None:
-    if path is None:
-        return None
-    candidate = Path(path)
-    if candidate.is_absolute():
-        return str(candidate)
-    return str(Path(config_path).resolve().parent / candidate)
-
-
 def load_omf_specs(config: dict[str, Any], config_path: str | Path, target_name: str | None = None) -> tuple[OmfCompareSpec, ...]:
     section = config.get("omf_compare", {})
     if not isinstance(section, dict):
@@ -796,15 +742,15 @@ def load_omf_specs(config: dict[str, Any], config_path: str | Path, target_name:
         label = f"omf_compare.functions[{index}]"
         if not isinstance(item, dict):
             raise OmfCompareError(f"{label} must be an object")
-        item_target = optional_config_string(item, "target")
+        item_target = optional_string(item, "target")
         if target_name is not None and item_target not in (None, target_name):
             continue
-        name = require_config_string(item, "name", f"{label}.name")
-        original = require_config_string(item, "original", f"{label}.original")
-        object_path = require_config_string(item, "object", f"{label}.object")
-        function_name = optional_config_string(item, "function") or name
+        name = require_string(item, "name", f"{label}.name")
+        original = require_string(item, "original", f"{label}.original")
+        object_path = require_string(item, "object", f"{label}.object")
+        function_name = optional_string(item, "function") or name
         target_kind = config.get("targets", {}).get(item_target or target_name, {}).get("kind")
-        bits = parse_config_int(item.get("bits", 32 if target_kind == "dos32-omf" else 16), f"{label}.bits")
+        bits = config_int(item.get("bits", 32 if target_kind == "dos32-omf" else 16), f"{label}.bits")
         if bits not in (16, 32):
             raise OmfCompareError(f"{label}.bits must be 16 or 32")
         expected_fixups = None
@@ -813,8 +759,8 @@ def load_omf_specs(config: dict[str, Any], config_path: str | Path, target_name:
             if not isinstance(raw_fixups, list) or not all(isinstance(f, dict) for f in raw_fixups):
                 raise OmfCompareError(f"{label}.expected_fixups must be a list of objects")
             expected_fixups = tuple(
-                (parse_config_int(f.get("offset"), f"{label}.expected_fixups.offset"),
-                 parse_config_int(f.get("size"), f"{label}.expected_fixups.size"))
+                (config_int(f.get("offset"), f"{label}.expected_fixups.offset"),
+                 config_int(f.get("size"), f"{label}.expected_fixups.size"))
                 for f in raw_fixups
             )
             if any(offset < 0 or size <= 0 for offset, size in expected_fixups):
@@ -823,25 +769,25 @@ def load_omf_specs(config: dict[str, Any], config_path: str | Path, target_name:
         if not isinstance(raw_literals, list) or not all(isinstance(f, dict) for f in raw_literals):
             raise OmfCompareError(f"{label}.literals must be a list of objects")
         literals = tuple(OmfLiteralSpec(**{
-            key: parse_config_int(literal.get(key), f"{label}.literals.{key}")
+            key: config_int(literal.get(key), f"{label}.literals.{key}")
             for key in ("original_offset", "segment_index", "object_offset", "size")
         }) for literal in raw_literals)
         specs.append(OmfCompareSpec(
             name=name,
             function_name=function_name,
             original_path=resolve_config_path(config_path, original) or "",
-            original_offset=parse_config_int(item.get("original_offset"), f"{label}.original_offset") or 0,
+            original_offset=config_int(item.get("original_offset"), f"{label}.original_offset") or 0,
             object_path=resolve_config_path(config_path, object_path) or "",
-            size=parse_config_int(item.get("size"), f"{label}.size", required=False),
-            object_offset=parse_config_int(item.get("object_offset", 0), f"{label}.object_offset") or 0,
-            segment_index=parse_config_int(item.get("segment_index"), f"{label}.segment_index", required=False),
-            ledata_index=parse_config_int(item.get("ledata_index", 0), f"{label}.ledata_index") or 0,
-            source_path=resolve_config_path(config_path, optional_config_string(item, "source")),
+            size=config_int(item.get("size"), f"{label}.size", required=False),
+            object_offset=config_int(item.get("object_offset", 0), f"{label}.object_offset") or 0,
+            segment_index=config_int(item.get("segment_index"), f"{label}.segment_index", required=False),
+            ledata_index=config_int(item.get("ledata_index", 0), f"{label}.ledata_index") or 0,
+            source_path=resolve_config_path(config_path, optional_string(item, "source")),
             target=item_target,
-            compiler_flags=optional_config_string(item, "compiler_flags"),
+            compiler_flags=optional_string(item, "compiler_flags"),
             bits=bits,
-            symbol=optional_config_string(item, "symbol"),
-            original_address=parse_config_int(item.get("original_address"), f"{label}.original_address", required=False),
+            symbol=optional_string(item, "symbol"),
+            original_address=config_int(item.get("original_address"), f"{label}.original_address", required=False),
             expected_fixups=expected_fixups,
             literals=literals,
         ))

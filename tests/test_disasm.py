@@ -7,8 +7,8 @@ import pytest
 from binary_comp.analyzers.values import (
     disassemble as disassemble_values,
     leading_successor_switch_table_start,
-    load_policy,
 )
+from binary_comp.policy import load_policy
 from binary_comp.core.disasm import (
     Instruction,
     Operand,

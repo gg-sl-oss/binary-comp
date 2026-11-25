@@ -11,12 +11,12 @@ from binary_comp.analyzers.values import (
     equivalent_structurally_reordered_immediates,
     following_call_signature,
     is_stack_probe_size_load,
-    load_policy,
     same_affine_memory_address,
     sign_step_outputs,
     stack_argument_origin_at,
     value_aware_align,
 )
+from binary_comp.policy import load_policy
 from binary_comp.core.disasm import Instruction, Operand
 
 

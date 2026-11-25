@@ -21,6 +21,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from binary_comp.core.disasm import signed32
 from binary_comp.core.pe import PEImage
 
 FUNCINFO_MAGICS = frozenset({0x19930520, 0x19930521, 0x19930522})
@@ -75,7 +76,7 @@ def _i32(image: PEImage, addr: int) -> int | None:
     value = _u32(image, addr)
     if value is None:
         return None
-    return value - 0x100000000 if value >= 0x80000000 else value
+    return signed32(value)
 
 
 def find_funcinfo(image: PEImage, func_start: int, max_scan: int = 64) -> int | None:

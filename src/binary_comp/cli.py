@@ -92,7 +92,7 @@ from binary_comp.analyzers.report import (
     generate_similarity_report,
     load_similarity_reasons,
 )
-from binary_comp.analyzers.values import ValuesOptions, check_values, format_summary, load_policy
+from binary_comp.analyzers.values import ValuesOptions, check_values, format_summary
 from binary_comp.analyzers.vtables import VtableOptions, check_vtables, format_vtable_summary
 from binary_comp.config import ConfigError, DEFAULT_CONFIG_PATH, ProjectTarget, load_project_target, parse_int
 from binary_comp.source.functions import load_source_groups, map_source_groups
@@ -109,6 +109,7 @@ from binary_comp.core.mz import (
     format_mz_comparison,
     parse_mz,
 )
+from binary_comp.policy import load_policy
 
 
 def add_values_parser(subparsers) -> None:
