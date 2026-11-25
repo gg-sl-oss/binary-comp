@@ -1,0 +1,30 @@
+$ binary-comp tpu-compare --original <TMP>/matching.bin --original-offset 0 --tpu <TMP>/unit.tpu --name caller
+exit: 0
+--- stdout ---
+TPU comparison for caller
+  original: <TMP>/matching.bin+0x0
+  unit:     <TMP>/unit.tpu code+0x0
+  size:     6 byte(s), masked fixup byte(s): 4
+  result:   MATCH
+--- stderr ---
+
+$ binary-comp tpu-compare --original <TMP>/different.bin --original-offset 0 --tpu <TMP>/unit.tpu --name caller
+exit: 1
+--- stdout ---
+TPU comparison for caller
+  original: <TMP>/different.bin+0x0
+  unit:     <TMP>/unit.tpu code+0x0
+  size:     6 byte(s), masked fixup byte(s): 4
+  result:   MISMATCH (1 unmasked byte difference(s))
+    +0x0005: original=c3 rebuilt=cb
+--- stderr ---
+
+$ binary-comp tpu-compare --original <TMP>/image.bin --tpu <TMP>/located.tpu --block 0 --locate --name f
+exit: 0
+--- stdout ---
+TPU comparison for f
+  original: <TMP>/image.bin+0x30
+  unit:     <TMP>/located.tpu block 0
+  size:     7 byte(s), masked fixup byte(s): 2
+  result:   MATCH
+--- stderr ---

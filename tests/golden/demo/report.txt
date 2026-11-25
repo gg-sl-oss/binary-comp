@@ -1,0 +1,27 @@
+$ binary-comp report --config binary-comp.json --target demo --no-build --bytes
+exit: 0
+--- stdout ---
+
+--- Similarity Report ---
+
+=== rebuilt.cpp ===
+  ScoreTable::score                             0x401029  100.00%      BYTES 1/22
+  Reactor::tick                                 0x401061  96.15%       SIZE +1
+  Door::canOpen                                 0x40109E  80.00%       SIZE -24
+  LessonLog::severity                           0x4010E8  50.00%       SIZE -50
+  boundary_after_reconstructed                  0x401185  100.00%      EXACT
+
+--- Summary ---
+Total compared: 5
+  100%: 2
+  >=90%: 3
+  <90%: 2
+  Errors/NOT FOUND: 0
+  Missing disassembly exports: 0
+  ASM fallback: 0
+  Average similarity: 85.23%
+Byte comparison: 5
+  Exact: 1
+  Same size, different bytes: 1
+  Different size: 3 (net -73 bytes)
+--- stderr ---

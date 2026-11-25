@@ -1,0 +1,21 @@
+$ binary-comp global-access --config binary-comp.json --target demo --no-build
+exit: 0
+--- stdout ---
+
+======================================================================
+GLOBAL ACCESS VERIFICATION REPORT
+  (showing named-global mismatches; use --all for address tokens)
+  (presence mode; set global_access.compare_counts=true for exact counts)
+======================================================================
+Functions selected: 5
+Functions checked: 3
+Functions with global access mismatches: 2
+
+Door::canOpen (0x40109E) [rebuilt.cpp]
+  MISSING: READ:g_Bonus_00407038 x1
+
+LessonLog::severity (0x4010E8) [rebuilt.cpp]
+  MISSING: READ:g_Title_00407030 x1
+  EXTRA:   READ:g_Title_00407030+0x1 x1
+
+--- stderr ---

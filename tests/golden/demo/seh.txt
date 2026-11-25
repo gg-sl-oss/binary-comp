@@ -1,0 +1,13 @@
+$ binary-comp seh --config binary-comp.json --target demo --report --no-build
+exit: 1
+--- stdout ---
+
+--- SEH structure differences ---
+
+=== rebuilt.cpp ===
+  LessonLog::severity  (0x4010E8)
+      WARNING: rebuilt has NO C++ EH frame, original unwinds 1 state(s) ['stack@ebp-0x10'] — a local object/try block is missing (small member destructors must be inline in a header to appear here)
+
+1 function(s) with EH-structure differences.
+Scanned 5 function(s), mapped 5, missing 0; EH frames original=1, rebuilt=0, both=0, original-only=1, rebuilt-only=0.
+--- stderr ---

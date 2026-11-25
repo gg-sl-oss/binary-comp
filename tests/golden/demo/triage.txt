@@ -1,0 +1,20 @@
+$ binary-comp triage --config binary-comp.json --target demo
+exit: 0
+--- stdout ---
+Structural triage
+
+Normalisation erases register choice, stack displacements and in-image
+addresses, then the streams are aligned so an inserted instruction does not
+misreport the rest as substitutions.  A `churn` verdict means no source edit
+can close the gap; it is not a claim that the function is correct.
+
+Functions triaged:        3
+  structural:             3
+  churn only:             0
+
+Structural — instructions in question, fewest first
+  function                                     addr     sim  mnem  imm  extra  miss  reg  slot  file
+  Reactor::tick                              401061   96.15     1    0      0     0    0     0  rebuilt.cpp
+  Door::canOpen                              40109E   80.00     0    0      0     5    0     0  rebuilt.cpp
+  LessonLog::severity                        4010E8   50.00     1    1      6    14    0     5  rebuilt.cpp
+--- stderr ---

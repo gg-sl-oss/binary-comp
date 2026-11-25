@@ -1,0 +1,41 @@
+$ binary-comp exe --config binary-comp.json --target demo --functions
+exit: 0
+--- stdout ---
+Comparing: <DEMO>/artifacts/original/original.exe
+     with: <DEMO>/artifacts/rebuilt/rebuilt.exe
+
+=== PE Section Comparison ===
+  Section       Original VA    Orig Size     Rebuilt VA Rebuilt Size Match
+  ---------- -------------- ------------ -------------- ------------ -----
+  .text          0x00401000        17832      0x00401000        11656 DIFF
+  .rdata         0x00406000          992      0x00404000          823 DIFF
+  .data          0x00407000         9188      0x00405000         9156 DIFF
+  .idata         0x0040A000         1320      0x00408000         1168 DIFF
+  .reloc         0x0040B000         1388      0x00409000         1034 DIFF
+
+  Entry point: 0x00401700 vs 0x00401240 DIFF
+
+=== Function Address Mapping ===
+  Total functions: 4
+  Library excluded: 1
+  Mapped in rebuilt: 4/4
+  At original address: 0/4 (0.0%)
+  Shifted: 4/4
+  Missing: 0/4
+  Byte-identical: 0/4
+
+     Address    Rebuilt  OSize  RSize   Raw% Status
+  ---------- ---------- ------ ------ ------ ----------
+  0x00401029 0x00401000     56     56  96.4% shifted
+  0x00401061 0x00401038     61     62  57.4% shifted
+  0x0040109E 0x00401076     74     50  74.0% shifted
+  0x004010E8 0x004010A8    157     71  15.5% shifted
+
+  First misalignment: 0x00401029 (expected) -> 0x00401000 (actual)
+
+=== Overall Summary ===
+  .text         422/11776    bytes match (3.6%)
+  .rdata        131/1024     bytes match (12.8%)
+  .data        4131/4608     bytes match (89.6%)
+  Total        4684/17408    bytes match (26.9%)
+--- stderr ---

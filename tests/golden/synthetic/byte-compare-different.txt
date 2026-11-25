@@ -1,0 +1,14 @@
+$ binary-comp byte-compare <TMP>/original.bin <TMP>/rebuilt.bin --fail-on-difference
+exit: 1
+--- stdout ---
+original: <TMP>/original.bin
+rebuilt:  <TMP>/rebuilt.bin
+Binary positional comparison
+  original size:       26
+  rebuilt size:        26 (+0)
+  matching positions:  25 / 26 (96.1538%)
+  differing positions: 1 in 1 run(s)
+  common prefix:       25
+  common suffix:       0
+  exact:               no
+--- stderr ---

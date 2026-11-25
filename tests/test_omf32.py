@@ -64,6 +64,7 @@ def sample(tmp_path):
 
 
 def test_fragmented_symbol_compares_full_body_and_decodes_32_bits(sample):
+    pytest.importorskip("capstone")
     comparison = compare_omf_spec_bytes(sample)
     assert comparison.matches
     assert comparison.object_offset == 0x10
@@ -87,6 +88,7 @@ def test_size_differences_cannot_be_hidden_by_truncation(sample, code):
 
 
 def test_changed_constant_fails_even_when_mnemonics_match(sample):
+    pytest.importorskip("capstone")
     code = bytearray(CODE)
     code[1] = 8
     write_object(Path(sample.object_path), code)
@@ -137,6 +139,7 @@ def config_for(sample, tmp_path):
 
 
 def test_config_cli_compare_report_and_strict_gate(sample, tmp_path, capsys):
+    pytest.importorskip("capstone")
     config = config_for(sample, tmp_path)
     args = ["--config", str(config), "--target", "sample", "--no-build"]
     assert main(["compare", *args, "CheckSlot"]) == 0
@@ -216,6 +219,7 @@ def switch_sample(tmp_path):
 
 
 def test_embedded_jump_table_is_not_decoded_as_code(switch_sample):
+    pytest.importorskip("capstone")
     assert compare_omf_spec_bytes(switch_sample).matches
     comparison = compare_omf_spec(switch_sample)
     for side, base in ((comparison.original, 0x10200), (comparison.rebuilt, 0x10)):

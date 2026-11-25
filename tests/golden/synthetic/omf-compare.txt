@@ -1,0 +1,23 @@
+$ binary-comp omf-compare --config <TMP>/binary-comp.json --target sample --no-build
+exit: 0
+--- stdout ---
+OMF comparison for CheckSlot
+  original: <TMP>/original.bin+0x30
+  object:   <TMP>/sample.obj LEDATA+0x10
+  size:     11 byte(s), masked fixup byte(s): 4
+  fixups:   MATCH (reviewed layout)
+  literal 1: MATCH
+  result:   MATCH
+--- stderr ---
+
+$ binary-comp omf-compare --config <TMP>/binary-comp.json --target sample --no-build --function CheckSlot
+exit: 1
+--- stdout ---
+OMF comparison for CheckSlot
+  original: <TMP>/original.bin+0x30
+  object:   <TMP>/sample.obj LEDATA+0x10
+  size:     11 byte(s), masked fixup byte(s): 4
+  fixups:   MATCH (reviewed layout)
+  literal 1: MISMATCH
+  result:   MISMATCH (0 unmasked byte difference(s))
+--- stderr ---
