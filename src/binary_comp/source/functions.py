@@ -39,26 +39,51 @@ def iter_source_files(
 ) -> Iterator[str]:
     """Files under ``source_dirs`` with one of ``extensions``, in sorted order.
 
-    Directories whose path contains ``map_skip`` are skipped, and so are
-    the files listed in ``source_excludes``. Missing directories are ignored.
+    Paths are matched by whole components. A directory is skipped when
+    ``map_skip`` (``map``, or ``legacy/map``) names some of its components,
+    so ``map`` skips ``src/map`` but not ``src/bitmap``. An entry of
+    ``source_excludes`` excludes that file, or everything under that
+    directory. Missing directories are ignored.
     """
-    excluded = {os.path.normcase(os.path.abspath(path)) for path in source_excludes}
+    excluded = tuple(_comparable(path) for path in source_excludes)
+    skip = _components(map_skip) if map_skip else None
     suffixes = tuple(extension.lower() for extension in extensions) if ignore_case else extensions
     for source_dir in source_dirs:
         if not source_dir or not os.path.isdir(source_dir):
             continue
         for root, dirs, files in os.walk(source_dir):
-            dirs.sort()
-            if map_skip and map_skip in root:
+            if (skip and _contains_components(_components(root), skip)) or _is_excluded(root, excluded):
+                dirs[:] = []
                 continue
+            dirs.sort()
             for filename in sorted(files):
                 name = filename.lower() if ignore_case else filename
                 if not name.endswith(suffixes):
                     continue
                 path = os.path.join(root, filename)
-                if excluded and os.path.normcase(os.path.abspath(path)) in excluded:
+                if _is_excluded(path, excluded):
                     continue
                 yield path
+
+
+def _comparable(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _components(path: str) -> tuple[str, ...]:
+    return tuple(part for part in os.path.normcase(path).replace("\\", "/").split("/") if part)
+
+
+def _contains_components(parts: tuple[str, ...], wanted: tuple[str, ...]) -> bool:
+    width = len(wanted)
+    return any(parts[index:index + width] == wanted for index in range(len(parts) - width + 1))
+
+
+def _is_excluded(path: str, excluded: tuple[str, ...]) -> bool:
+    if not excluded:
+        return False
+    candidate = _comparable(path)
+    return any(candidate == item or candidate.startswith(item.rstrip(os.sep) + os.sep) for item in excluded)
 
 
 def source_object_name(source_path: str) -> str:

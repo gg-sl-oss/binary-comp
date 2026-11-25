@@ -1645,21 +1645,11 @@ DISASM_REGISTER_SIZES = {
 def iter_source_scan_files(source_dirs: Sequence[str],
                            source_excludes: Sequence[str]) -> Iterable[str]:
     suffixes = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
-    excludes = tuple(source_excludes)
-    for source_dir in source_dirs:
-        if not source_dir or not os.path.isdir(source_dir):
-            continue
-        for root, dirs, files in os.walk(source_dir):
-            if excludes and any(exclude and exclude in root for exclude in excludes):
-                dirs[:] = []
-                continue
-            for filename in files:
-                if not filename.endswith(suffixes):
-                    continue
-                path = os.path.join(root, filename)
-                if excludes and any(exclude and exclude in path for exclude in excludes):
-                    continue
-                yield path
+    yield from iter_source_files(
+        source_dirs,
+        suffixes,
+        source_excludes=[exclude for exclude in source_excludes if exclude],
+    )
 
 
 def mask_comments_for_layout_scan(text: str) -> str:
