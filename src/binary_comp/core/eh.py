@@ -117,7 +117,12 @@ def find_funcinfo(image: PEImage, func_start: int, max_scan: int = 64) -> int | 
     decoded = list(_md().disasm(thunk, handler))
     # __CxxFrameHandler thunk: ``mov eax, <FuncInfo>; jmp <dispatcher>``
     if decoded and decoded[0].mnemonic == "mov" and decoded[0].op_str.startswith("eax,"):
-        return int(decoded[0].op_str.split(",", 1)[1].strip(), 16)
+        source = decoded[0].op_str.split(",", 1)[1].strip()
+        try:
+            return int(source, 16)
+        except ValueError:
+            # ``mov eax, <register or memory>`` is not a FuncInfo thunk.
+            return None
     return None
 
 
