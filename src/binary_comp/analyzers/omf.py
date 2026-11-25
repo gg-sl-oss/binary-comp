@@ -828,7 +828,7 @@ def generate_omf_similarity_report(
     target: ProjectTarget,
     options: SimilarityReportOptions = SimilarityReportOptions(),
 ) -> SimilarityReport:
-    from binary_comp.analyzers.function_compare import maybe_build
+    from binary_comp.build import maybe_build
 
     maybe_build(target, options.build)
     rows: list[SimilarityReportRow] = []

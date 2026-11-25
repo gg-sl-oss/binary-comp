@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from dataclasses import dataclass, field
 
+from binary_comp.build import maybe_build
 from binary_comp.config import ProjectTarget
 from binary_comp.core.align import lcs_align
 from binary_comp.core.disasm import (
@@ -3633,23 +3633,8 @@ def format_kind_counts(counts: dict[str, int]) -> str:
     return ", ".join(parts) if parts else "none"
 
 
-def maybe_build(target: ProjectTarget, do_build: bool) -> int:
-    if not do_build:
-        return 0
-    if target.build.clean:
-        subprocess.run(target.build.clean.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if not target.build.build:
-        return 0
-    build_command = target.build.build.split()
-    if target.build.jobs and target.build.jobs > 1:
-        build_command.append(f"-j{target.build.jobs}")
-    return subprocess.run(build_command, check=False).returncode
-
-
 def check_values(target: ProjectTarget, policy: VerifierPolicy, options: ValuesOptions) -> ValuesSummary:
-    build_rc = maybe_build(target, options.build)
-    if build_rc != 0:
-        raise RuntimeError("build failed")
+    maybe_build(target, options.build)
 
     for path, label in (
         (target.original_exe, "original executable"),

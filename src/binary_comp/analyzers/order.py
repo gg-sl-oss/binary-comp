@@ -15,7 +15,7 @@ import re
 import struct
 from dataclasses import dataclass
 
-from binary_comp.analyzers.function_compare import maybe_build
+from binary_comp.build import maybe_build
 from binary_comp.analyzers.report import (
     SimilarityReportOptions,
     disassembly_path,

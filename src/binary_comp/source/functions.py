@@ -5,11 +5,15 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from binary_comp.core.mapfile import MapEntry, parse_msvc_map_by_obj
 from binary_comp.core.symbols import normalize_compiled, symbol_matches, symbol_patterns_for_function
 
 from .cpp import SourceFunctionGroup, parse_source_function_groups
+
+if TYPE_CHECKING:
+    from binary_comp.config import ProjectTarget
 
 SOURCE_EXTENSIONS = (".cpp", ".c", ".C", ".asm")
 
@@ -142,3 +146,48 @@ def map_source_groups(
             ))
 
     return mapped, missing, entries_by_obj
+
+
+def build_source_function_address_map(
+    target: ProjectTarget,
+    function_addresses: dict | None = None,
+) -> dict[int, int]:
+    """Map each annotated original function address to its rebuilt address."""
+    if target.kind in ("dos32-omf", "le"):
+        from binary_comp.config import parse_int
+        from binary_comp.core.le import LEImage
+        from binary_comp.core.mapfile import parse_watcom_map_symbols
+        from binary_comp.source.cpp import parse_source_functions
+
+        image = LEImage(target.rebuilt_exe)
+        symbols: dict[str, set[int]] = {}
+        for entry in parse_watcom_map_symbols(target.map_path, image.segment_bases()):
+            symbols.setdefault(entry.symbol, set()).add(entry.va)
+        mapping: dict[int, int] = {}
+        for directory in target.source_dirs:
+            for root, _dirs, files in os.walk(directory):
+                for filename in files:
+                    if not filename.lower().endswith((".c", ".cc", ".cpp", ".cxx")):
+                        continue
+                    for function in parse_source_functions(os.path.join(root, filename)):
+                        names = (function.name, function.name + "_", "_" + function.name, function.name.upper())
+                        matches = set().union(*(symbols.get(name, set()) for name in names))
+                        if len(matches) == 1:
+                            mapping[int(function.address, 16)] = next(iter(matches))
+        for name, address in (function_addresses or {}).items():
+            names = (name, name + "_", "_" + name, name.upper())
+            matches = set().union(*(symbols.get(symbol, set()) for symbol in names))
+            if len(matches) == 1:
+                mapping[parse_int(address, f"globals.function_addresses.{name}")] = next(iter(matches))
+        return mapping
+    groups_by_source = load_source_groups(
+        target.source_dirs,
+        target.map_skip,
+        target.source_excludes,
+    )
+    mapped_groups, _, _ = map_source_groups(groups_by_source, target.map_path)
+    mapping: dict[int, int] = {}
+    for group in mapped_groups:
+        for address in group.original_addrs:
+            mapping[address] = group.rebuilt_addr
+    return mapping

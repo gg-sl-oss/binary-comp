@@ -11,7 +11,6 @@ from typing import Any, Iterable, Sequence
 from binary_comp.analyzers.calls import (
     CallsOptions,
     load_calls_policy,
-    maybe_build,
     normalize_compiled,
     policy_with_same_address_aliases,
     select_functions,
@@ -26,6 +25,7 @@ from binary_comp.analyzers.globals import (
     parse_globals_source,
     symbol_for_auto_global,
 )
+from binary_comp.build import maybe_build
 from binary_comp.config import ConfigError, ProjectTarget
 from binary_comp.core.pe import PEImage
 
@@ -678,7 +678,7 @@ def check_global_accesses(
     if not functions:
         raise RuntimeError("no functions selected for verification")
 
-    maybe_build(target, call_options, calls_policy)
+    maybe_build(target, call_options.build, call_options.build_args or calls_policy.build_args)
 
     decls = configured_global_decls(config, target)
     global_ranges = auto_global_ranges(decls)

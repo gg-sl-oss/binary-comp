@@ -6,11 +6,11 @@ import glob
 import os
 import re
 import struct
-import subprocess
 from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any
 
+from binary_comp.build import maybe_build
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
 from binary_comp.core.disasm import Instruction, disassemble_reachable_x86, unsigned32
 from binary_comp.core.mapfile import parse_msvc_map_symbols
@@ -1151,22 +1151,6 @@ def select_functions(
     return functions, skipped_no_disasm
 
 
-def maybe_build(target: ProjectTarget, options: CallsOptions, policy: CallsPolicy) -> None:
-    if not options.build:
-        return
-    if target.build.clean:
-        subprocess.run(target.build.clean.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if not target.build.build:
-        return
-    build_command = target.build.build.split()
-    build_command.extend(options.build_args or policy.build_args)
-    if target.build.jobs and target.build.jobs > 1:
-        build_command.append(f"-j{target.build.jobs}")
-    result = subprocess.run(build_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if result.returncode != 0:
-        raise RuntimeError("build failed")
-
-
 def check_calls(config: dict[str, Any], target: ProjectTarget, options: CallsOptions) -> CallsSummary:
     global IAT_ADDRESSES, IAT_ADDRESS_RANGES
 
@@ -1184,7 +1168,7 @@ def check_calls(config: dict[str, Any], target: ProjectTarget, options: CallsOpt
     if not functions:
         raise RuntimeError("no functions selected for verification")
 
-    maybe_build(target, options, policy)
+    maybe_build(target, options.build, options.build_args or policy.build_args)
 
     if policy.use_pe_iat:
         try:

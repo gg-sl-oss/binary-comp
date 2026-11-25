@@ -386,3 +386,46 @@ def load_project_target(config_path: str | os.PathLike[str], target: str) -> tup
         project_target = _target_from_legacy(config, target)
     configure_preprocessor(project_target.preprocessor)
     return config, project_target
+
+
+def extract_globals_type_sizes(config: dict) -> dict[str, int]:
+    globals_section = config.get("globals", {})
+    if not isinstance(globals_section, dict):
+        return {}
+    type_sizes = globals_section.get("type_sizes", {})
+    if not isinstance(type_sizes, dict):
+        return {}
+    out: dict[str, int] = {}
+    for name, size in type_sizes.items():
+        if isinstance(size, int):
+            out[str(name)] = size
+        elif isinstance(size, str):
+            try:
+                out[str(name)] = int(size, 0)
+            except ValueError:
+                continue
+    return out
+
+
+def extract_canonical_aliases(config: dict) -> dict[str, str]:
+    calls = config.get("calls", {})
+    if not isinstance(calls, dict):
+        return {}
+    aliases = calls.get("canonical_aliases", {})
+    if not isinstance(aliases, dict):
+        return {}
+    return {
+        str(source): str(target)
+        for source, target in aliases.items()
+        if isinstance(source, str) and isinstance(target, str) and source and target
+    }
+
+
+def extract_signature_overloads(config: dict) -> frozenset[str]:
+    calls = config.get("calls", {})
+    if not isinstance(calls, dict):
+        return frozenset()
+    overloads = calls.get("signature_overloads", [])
+    if not isinstance(overloads, list):
+        return frozenset()
+    return frozenset(str(item) for item in overloads if isinstance(item, str) and item)
