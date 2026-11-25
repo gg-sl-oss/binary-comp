@@ -17,6 +17,7 @@ except ImportError:
     X86_OP_IMM = X86_OP_MEM = X86_OP_REG = None
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
+from binary_comp.core.ghidra import iter_exports
 from binary_comp.core.mapfile import parse_encoded_address_symbols, parse_msvc_map_symbols, parse_watcom_map_symbols
 from binary_comp.core.image import load_image
 from binary_comp.core.le import LEImage
@@ -2206,10 +2207,7 @@ def find_original_direct_global_span_issues(decls: Sequence[GlobalDecl],
     issues: List[Issue] = []
     seen: Set[Tuple[str, int, int]] = set()
 
-    for filename in sorted(os.listdir(code_dir)):
-        if not filename.endswith(".disassembled.txt"):
-            continue
-        path = os.path.join(code_dir, filename)
+    for _, path in iter_exports(code_dir):
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
@@ -2284,10 +2282,7 @@ def find_original_indexed_global_issues(decls: Sequence[GlobalDecl],
     issues: List[Issue] = []
     seen: Set[Tuple[str, int]] = set()
 
-    for filename in sorted(os.listdir(code_dir)):
-        if not filename.endswith(".disassembled.txt"):
-            continue
-        path = os.path.join(code_dir, filename)
+    for _, path in iter_exports(code_dir):
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()

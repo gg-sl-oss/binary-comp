@@ -9,7 +9,12 @@ from pathlib import Path
 from binary_comp.analyzers.function_compare import direct_branch_target, disassemble_function
 from binary_comp.config import ConfigError, ProjectTarget
 from binary_comp.core.disasm import Instruction
-from binary_comp.core.ghidra import function_starts_from_export_dir
+from binary_comp.core.ghidra import (
+    EXPORT_GLOB,
+    export_path,
+    function_starts_from_export_dir,
+    render_export_header,
+)
 from binary_comp.core.mapfile import MapEntry, function_starts_from_map, parse_msvc_map_by_obj
 from binary_comp.core.pe import EXECUTABLE_FLAG, PEImage, Section
 from binary_comp.core.symbols import normalize_compiled
@@ -114,11 +119,7 @@ def export_instruction_text(raw: str) -> str:
 
 
 def render_export(name: str, address: int, instructions) -> str:
-    lines = [
-        f"Function: {name or f'FUN_{address:08X}'}",
-        f"Address: 0x{address:08X}",
-        "",
-    ]
+    lines = render_export_header(name, address)
     previous = None
     for instr in instructions:
         if (
@@ -134,7 +135,7 @@ def render_export(name: str, address: int, instructions) -> str:
 
 def clean_exports(out_dir: Path) -> int:
     removed = 0
-    for path in out_dir.glob("FUN_*.disassembled.txt"):
+    for path in out_dir.glob(EXPORT_GLOB):
         path.unlink()
         removed += 1
     return removed
@@ -286,7 +287,7 @@ def export_asm(target: ProjectTarget, options: ExportAsmOptions = ExportAsmOptio
         if not result.instructions:
             skipped.append((address, targets[address]))
             continue
-        path = out_dir / f"FUN_{address:08X}.disassembled.txt"
+        path = Path(export_path(str(out_dir), address))
         path.write_text(
             render_export(targets[address], address, result.instructions),
             encoding="utf-8",

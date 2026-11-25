@@ -14,6 +14,7 @@ from binary_comp.core.disasm import (
     has_msvc_seh_frame,
     unsigned32,
 )
+from binary_comp.core.ghidra import export_address, find_export, read_export_body
 from binary_comp.core.mapfile import function_starts_from_map, parse_msvc_map_by_obj
 from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import (
@@ -62,24 +63,6 @@ def load_disassembly_policy(target: ProjectTarget) -> tuple[int, frozenset[str]]
         return DEFAULT_MAX_DISASSEMBLY_BYTES, DEFAULT_PADDING_MNEMONICS
 
 
-def parse_original_address(disassembled_code_path: str) -> int | None:
-    filename = os.path.basename(disassembled_code_path)
-    match = re.search(r"FUN_([0-9A-Fa-f]+)\.disassembled\.txt$", filename)
-    if match:
-        return int(match.group(1), 16)
-
-    try:
-        with open(disassembled_code_path, "r", encoding="utf-8", errors="ignore") as f:
-            head = f.read(512)
-    except OSError:
-        return None
-
-    match = re.search(r"Address:\s*0x([0-9A-Fa-f]+)", head)
-    if match:
-        return int(match.group(1), 16)
-    return None
-
-
 def is_instruction_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
@@ -95,12 +78,7 @@ def is_instruction_line(line: str) -> bool:
 
 
 def disassembly_blocks_from_export(disassembled_code_path: str, function_start: int) -> list[tuple[int, int]]:
-    try:
-        with open(disassembled_code_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.read().splitlines()[3:]
-    except OSError:
-        return []
-
+    lines = read_export_body(disassembled_code_path)
     blocks: list[tuple[int, int]] = []
     current_addr = function_start
     current_count = 0
@@ -620,7 +598,7 @@ class FunctionComparer:
     ) -> FunctionComparison:
         maybe_build(self.target, build)
 
-        original_addr = parse_original_address(disassembled_code_path)
+        original_addr = export_address(disassembled_code_path)
         if original_addr is None:
             raise FunctionCompareError("could not determine original function address")
 
@@ -688,7 +666,7 @@ class FunctionComparer:
 
         addr_paths: list[tuple[int, str]] = []
         for path in disassembled_code_paths:
-            addr = parse_original_address(path)
+            addr = export_address(path)
             if addr is not None:
                 addr_paths.append((addr, path))
         if not addr_paths:
@@ -747,19 +725,6 @@ class FunctionComparer:
             original=DisassemblyResult(original_instructions, []),
         )
 
-    def _disasm_path(self, address: int) -> str | None:
-        if not self.target.code_dir:
-            return None
-        candidates = (
-            os.path.join(self.target.code_dir, f"FUN_{address:08X}.disassembled.txt"),
-            os.path.join(self.target.code_dir, f"FUN_{address:06X}.disassembled.txt"),
-            os.path.join(self.target.code_dir, f"FUN_{address:X}.disassembled.txt"),
-        )
-        for path in candidates:
-            if os.path.exists(path):
-                return path
-        return None
-
     def sibling_chunk_paths(self, function_name: str, disassembled_code_path: str) -> list[str] | None:
         """Disasm paths for all chunks of an SEH-split function, or None.
 
@@ -770,7 +735,7 @@ class FunctionComparer:
         can compare the whole rebuilt function against the combined original.
         Returns None for ordinary single-chunk functions.
         """
-        addr = parse_original_address(disassembled_code_path)
+        addr = export_address(disassembled_code_path)
         if addr is None:
             return None
         try:
@@ -786,7 +751,7 @@ class FunctionComparer:
             ):
                 paths: list[str] = []
                 for chunk_addr in sorted(group.original_addrs):
-                    path = self._disasm_path(chunk_addr)
+                    path = find_export(self.target.code_dir, chunk_addr)
                     if path is None:
                         return None
                     paths.append(path)

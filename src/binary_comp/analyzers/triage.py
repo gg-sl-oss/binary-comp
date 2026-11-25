@@ -36,11 +36,11 @@ from binary_comp.analyzers.function_compare import (
     FunctionCompareError,
     FunctionComparer,
 )
-from binary_comp.analyzers.report import disassembly_path
 from binary_comp.build import maybe_build
 from binary_comp.source.functions import load_source_groups
 from binary_comp.config import ProjectTarget
 from binary_comp.core.disasm import Instruction
+from binary_comp.core.ghidra import resolve_export
 
 REGISTERS = (
     "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
@@ -381,7 +381,7 @@ def generate_triage_report(
             if len(group.addresses) != 1:
                 continue          # SEH splits and duplicate instances: not triageable
             original_addr = int(group.addresses[0], 16)
-            path = disassembly_path(target, original_addr)
+            path = resolve_export(target.code_dir, original_addr)
             if path is None or not os.path.exists(path):
                 continue
             try:
