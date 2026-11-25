@@ -43,3 +43,23 @@ def test_pe_image_reads_sections_and_strings(sample_binaries):
     assert image.read(TEXT_VA, 1) == b"\xB8"
     assert image.c_string_at(DATA_VA) == "hello"
     assert image.read(DATA_VA + 0x18, 4) == b"\0\0\0\0"
+
+
+def test_map_is_reread_after_it_changes(tmp_path):
+    import os
+
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(" 0001:00000000       _main   00401000 f   main.obj\n", encoding="latin1")
+    assert [entry.symbol for entry in parse_msvc_map_by_obj(str(map_path))["main.obj"]] == ["_main"]
+
+    map_path.write_text(
+        " 0001:00000000       _main   00401000 f   main.obj\n"
+        " 0001:00000010       _other  00401010 f   main.obj\n"
+        " 0001:00000020       _inline 00401020 f i main.obj\n",
+        encoding="latin1",
+    )
+    stat = os.stat(map_path)
+    os.utime(map_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    # Inline ("f i") lines are not part of the by-object view.
+    assert [entry.symbol for entry in parse_msvc_map_by_obj(str(map_path))["main.obj"]] == ["_main", "_other"]
+    assert parse_msvc_map_by_obj(str(tmp_path / "missing.map")) == {}

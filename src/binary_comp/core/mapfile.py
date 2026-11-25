@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -33,12 +34,6 @@ class MapSymbol:
     object_file: str | None
 
 
-FUNCTION_LINE_RE = re.compile(
-    r"0001:[0-9a-fA-F]+\s+(\S+)\s+([0-9a-fA-F]{8})\s+f\s+(\S+\.obj)"
-)
-MAP_SYMBOL_LINE_RE = re.compile(
-    r"\s*[0-9a-fA-F]{4}:[0-9a-fA-F]+\s+(\S+)\s+([0-9a-fA-F]{8})(?:\s+(\S+))?"
-)
 ENCODED_ADDRESS_SUFFIX_RE = re.compile(
     r"_([0-9a-fA-F]{6,8})(?:@@\S*)?$"
 )
@@ -47,20 +42,60 @@ ANY_SEGMENT_SYMBOL_LINE_RE = re.compile(
 )
 
 
-def parse_msvc_map_by_obj(map_path: str) -> dict[str, list[MapEntry]]:
-    entries_by_obj: dict[str, list[MapEntry]] = {}
-    if not os.path.exists(map_path):
-        return entries_by_obj
+@dataclass(frozen=True)
+class _MapLine:
+    """One ``ssss:oooooooo symbol va [flags] [object]`` line, as written."""
 
+    segment: int
+    va: int
+    symbol: str
+    rest: tuple[str, ...]
+
+
+def _read_msvc_map(map_path: str) -> tuple[_MapLine, ...]:
+    """Every symbol line of an MSVC map in file order; empty if it is missing.
+
+    Several analyzers ask for the same map in one run, so the parse is cached
+    and only redone when the file changes (for example after a rebuild).
+    """
+    try:
+        stat = os.stat(map_path)
+    except OSError:
+        return ()
+    return _read_msvc_map_cached(map_path, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=8)
+def _read_msvc_map_cached(map_path: str, _mtime_ns: int, _size: int) -> tuple[_MapLine, ...]:
+    lines: list[_MapLine] = []
     with open(map_path, "r", encoding="latin1", errors="ignore") as f:
         for line in f:
-            match = FUNCTION_LINE_RE.search(line)
+            match = ANY_SEGMENT_SYMBOL_LINE_RE.match(line)
             if not match:
                 continue
-            symbol = match.group(1)
-            va = int(match.group(2), 16)
-            object_file = match.group(3)
-            entries_by_obj.setdefault(object_file, []).append(MapEntry(va, symbol, object_file))
+            lines.append(_MapLine(
+                segment=int(match.group("segment"), 16),
+                va=int(match.group("va"), 16),
+                symbol=match.group("symbol"),
+                rest=tuple(match.group("rest").split()),
+            ))
+    return tuple(lines)
+
+
+def parse_msvc_map_by_obj(map_path: str) -> dict[str, list[MapEntry]]:
+    """Code symbols by object file: segment 0001 lines written ``f <name>.obj``.
+
+    Lines with more flags (``f i <name>.obj`` for inline functions) are left
+    out, as they always have been.
+    """
+    entries_by_obj: dict[str, list[MapEntry]] = {}
+    for line in _read_msvc_map(map_path):
+        if line.segment != 1 or len(line.rest) < 2 or line.rest[0] != "f":
+            continue
+        object_file = line.rest[1]
+        if len(object_file) <= len(".obj") or not object_file.endswith(".obj"):
+            continue
+        entries_by_obj.setdefault(object_file, []).append(MapEntry(line.va, line.symbol, object_file))
 
     for entries in entries_by_obj.values():
         entries.sort(key=lambda entry: entry.va)
@@ -79,25 +114,16 @@ def parse_msvc_map_symbols(map_path: str) -> list[MapSymbol]:
     Vtables live in the CONST segment, so the vtable checks need the wider
     view. Returns an empty list when the map is missing.
     """
-    symbols: list[MapSymbol] = []
-    if not os.path.exists(map_path):
-        return symbols
-
-    with open(map_path, "r", encoding="latin1", errors="ignore") as f:
-        for line in f:
-            match = ANY_SEGMENT_SYMBOL_LINE_RE.match(line)
-            if not match:
-                continue
-            rest = match.group("rest").split()
-            object_file = next((token for token in rest if token.endswith(".obj")), None)
-            symbols.append(MapSymbol(
-                segment=int(match.group("segment"), 16),
-                va=int(match.group("va"), 16),
-                symbol=match.group("symbol"),
-                is_function=bool(rest) and rest[0] == "f",
-                object_file=object_file,
-            ))
-
+    symbols = [
+        MapSymbol(
+            segment=line.segment,
+            va=line.va,
+            symbol=line.symbol,
+            is_function=bool(line.rest) and line.rest[0] == "f",
+            object_file=next((token for token in line.rest if token.endswith(".obj")), None),
+        )
+        for line in _read_msvc_map(map_path)
+    ]
     symbols.sort(key=lambda entry: (entry.va, entry.symbol))
     return symbols
 
@@ -117,26 +143,22 @@ def parse_encoded_address_map(map_path: str) -> dict[int, int]:
 
 
 def parse_encoded_address_symbols(map_path: str) -> list[EncodedAddressMapEntry]:
-    """Return rebuilt map symbols whose names encode an original address."""
-    entries: list[EncodedAddressMapEntry] = []
-    if not os.path.exists(map_path):
-        return entries
+    """Return rebuilt map symbols whose names encode an original address.
 
-    with open(map_path, "r", encoding="latin1", errors="ignore") as f:
-        for line in f:
-            line_match = MAP_SYMBOL_LINE_RE.match(line)
-            if not line_match:
-                continue
-            symbol = line_match.group(1)
-            address_match = ENCODED_ADDRESS_SUFFIX_RE.search(symbol)
-            if not address_match:
-                continue
-            entries.append(EncodedAddressMapEntry(
-                original_va=int(address_match.group(1), 16),
-                rebuilt_va=int(line_match.group(2), 16),
-                symbol=symbol,
-                object_file=line_match.group(3),
-            ))
+    ``object_file`` is the first token after the address, which is the ``f``
+    flag rather than the object for function symbols.
+    """
+    entries: list[EncodedAddressMapEntry] = []
+    for line in _read_msvc_map(map_path):
+        address_match = ENCODED_ADDRESS_SUFFIX_RE.search(line.symbol)
+        if not address_match:
+            continue
+        entries.append(EncodedAddressMapEntry(
+            original_va=int(address_match.group(1), 16),
+            rebuilt_va=line.va,
+            symbol=line.symbol,
+            object_file=line.rest[0] if line.rest else None,
+        ))
 
     entries.sort(key=lambda entry: (entry.original_va, entry.symbol, entry.rebuilt_va))
     return entries
