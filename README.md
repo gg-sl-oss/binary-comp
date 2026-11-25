@@ -207,6 +207,12 @@ and without a declaration every source is parsed exactly as written. MSVC
 `__asm` blocks and statements are always blanked before parsing, so functions
 written in inline assembly stay in the inventory.
 
+`globals` and `data` evaluate array dimensions, `#define` values and integer
+initializers with the same C evaluator as `#if`: division truncates toward
+zero, a leading `0` means octal, and character literals, `%`, `^`, `~`,
+comparisons and `?:` are understood. An expression that names an unknown
+macro, calls a function or uses `sizeof` does not evaluate.
+
 ### Source Function Annotations
 
 Place a `Function start` comment immediately before the rebuilt source function

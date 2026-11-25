@@ -18,6 +18,7 @@ except ImportError:
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
 from binary_comp.core.symbols import encoded_address
+from binary_comp.source.preprocessor import evaluate_constant
 from binary_comp.core.mapfile import parse_encoded_address_symbols, parse_msvc_map_symbols, parse_watcom_map_symbols
 from binary_comp.core.image import load_image
 from binary_comp.core.le import LEImage
@@ -614,43 +615,8 @@ def parse_defines(paths: Iterable[str]) -> Dict[str, int]:
 
 
 def eval_int_expr(expr: str, constants: Dict[str, int]) -> int:
-    expr = expr.strip()
-    expr = re.sub(r"\b(0x[0-9A-Fa-f]+)[uUlL]+\b", r"\1", expr)
-    expr = re.sub(r"\b([0-9]+)[uUlL]+\b", r"\1", expr)
-    for name, value in constants.items():
-        expr = re.sub(rf"\b{re.escape(name)}\b", str(value), expr)
-    node = ast.parse(expr, mode="eval")
-
-    def visit(n):
-        if isinstance(n, ast.Expression):
-            return visit(n.body)
-        if isinstance(n, ast.Constant) and isinstance(n.value, int):
-            return n.value
-        if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.USub, ast.UAdd)):
-            val = visit(n.operand)
-            return -val if isinstance(n.op, ast.USub) else val
-        if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Div, ast.LShift, ast.RShift, ast.BitOr, ast.BitAnd)):
-            left = visit(n.left)
-            right = visit(n.right)
-            if isinstance(n.op, ast.Add):
-                return left + right
-            if isinstance(n.op, ast.Sub):
-                return left - right
-            if isinstance(n.op, ast.Mult):
-                return left * right
-            if isinstance(n.op, (ast.FloorDiv, ast.Div)):
-                return left // right
-            if isinstance(n.op, ast.LShift):
-                return left << right
-            if isinstance(n.op, ast.RShift):
-                return left >> right
-            if isinstance(n.op, ast.BitOr):
-                return left | right
-            if isinstance(n.op, ast.BitAnd):
-                return left & right
-        raise ValueError(expr)
-
-    return int(visit(node))
+    """A C integer constant expression; ValueError when it does not evaluate."""
+    return evaluate_constant(expr, constants)
 
 
 def normalize_type(type_text: str) -> str:

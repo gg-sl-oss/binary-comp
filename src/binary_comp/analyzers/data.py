@@ -135,7 +135,7 @@ def _lenient_size(decl: GlobalDecl, constants: dict[str, int], types: GlobalType
     for dim in decl.dims:
         try:
             size *= eval_int_expr(dim, constants)
-        except (ValueError, SyntaxError, ZeroDivisionError):
+        except ValueError:
             continue
     return size
 

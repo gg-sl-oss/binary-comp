@@ -428,3 +428,21 @@ def test_symbolic_struct_array_packs_byte_fields():
 
     assert note == ""
     assert data == bytes([1, 0x03, 0x02, 0xFF, 4, 5, 0, 6])
+
+
+def test_eval_int_expr_uses_c_semantics():
+    from binary_comp.analyzers.globals import eval_int_expr
+
+    assert eval_int_expr("-7 / 2", {}) == -3  # truncates toward zero
+    assert eval_int_expr("-7 % 2", {}) == -1
+    assert eval_int_expr("010", {}) == 8  # octal
+    assert eval_int_expr("'A' + 1", {}) == 66
+    assert eval_int_expr("0x10u << 2", {}) == 64
+    assert eval_int_expr("(COUNT > 4 ? COUNT : 4) ^ 1", {"COUNT": 6}) == 7
+    assert eval_int_expr("5 * 25 * 15", {}) == 1875
+    with pytest.raises(ValueError):
+        eval_int_expr("UNKNOWN_NAME + 1", {})
+    with pytest.raises(ValueError):
+        eval_int_expr("1 / 0", {})
+    with pytest.raises(ValueError):
+        eval_int_expr("sizeof(int)", {})
