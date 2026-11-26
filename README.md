@@ -308,7 +308,7 @@ original addresses for external function-pointer initializers. The `data`
 | `globals` | `original_exe`, `globals_source` | Optional headers and `auto_complete` broaden coverage. `--check-rebuilt-layout` also needs the rebuilt MAP/assembly for relocation-sensitive access checks. |
 | `calls` | `source_dirs`, `code_export_dir`, `asm_dir` | Compares call target multisets from original exports and rebuilt assembly listings. |
 | `global-access` | `source_dirs`, `code_export_dir`, `asm_dir` | Compares read/write multisets for global data references. |
-| `vtables` | `original_exe`, `source_dirs`, `code_export_dir` | Reads vtable bytes and constructor vptr writes from the original PE. |
+| `vtables` | `original_exe`, `source_dirs`, `code_export_dir` | Reads vtable bytes and constructor vptr writes from the original PE. Vtables are looked for in an address range: `--rdata-min`/`--rdata-max` when given, otherwise the original's `.rdata` section, otherwise `vtables.rdata_range` in the config. The flags used to be ignored whenever `.rdata` existed; they now always take precedence. |
 | `seh` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | Compares MSVC C++ EH FuncInfo metadata for a function or report. |
 
 ## CLI Examples
@@ -329,6 +329,7 @@ binary-comp report --config path/to/binary-comp.json --target full --reasons rea
 binary-comp report --config path/to/binary-comp.json --target full --bytes
 binary-comp order --config path/to/binary-comp.json --target full --no-build
 binary-comp vtables --config path/to/binary-comp.json --target full --dump
+binary-comp vtables --config path/to/binary-comp.json --target full --rdata-min 0x406000 --rdata-max 0x407000
 binary-comp seh --config path/to/binary-comp.json --target full --report
 binary-comp byte-compare ORIGINAL.OVR REBUILT.OVR
 binary-comp mz-compare ORIGINALU.EXE REBUILTU.EXE

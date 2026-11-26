@@ -233,10 +233,19 @@ def parse_int_value_map(values: dict[str, Any]) -> dict[int, int]:
     }
 
 
+# String and character literals are matched first so that "//" or "/*"
+# inside them (``"http://x"``) is not taken for a comment.
+_LITERAL_OR_COMMENT_RE = re.compile(
+    r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|/\*.*?\*/|//[^\n]*',
+    re.S,
+)
+
+
 def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    text = re.sub(r"//.*", "", text)
-    return text
+    return _LITERAL_OR_COMMENT_RE.sub(
+        lambda match: "" if match.group(0).startswith("/") else match.group(0),
+        text,
+    )
 
 
 def address_from_encoded_suffix(name: str) -> Optional[int]:

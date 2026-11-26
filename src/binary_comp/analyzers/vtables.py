@@ -540,6 +540,10 @@ def find_implemented_functions(source_dirs: tuple[str, ...], map_skip: str | Non
     return implementations
 
 
+def first_not_none(*values: int | None) -> int | None:
+    return next((value for value in values if value is not None), None)
+
+
 def is_rdata_address(value: int, rdata_min: int, rdata_max: int) -> bool:
     return rdata_min <= unsigned32(value) < rdata_max
 
@@ -1342,8 +1346,10 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
     rdata = image.section_named(".rdata")
 
     configured_min, configured_max = policy.rdata_range
-    rdata_min = rdata.start if rdata is not None else options.rdata_min if options.rdata_min is not None else configured_min
-    rdata_max = rdata.end if rdata is not None else options.rdata_max if options.rdata_max is not None else configured_max
+    # An explicit --rdata-min/--rdata-max wins; otherwise use the .rdata
+    # section, and fall back to the configured range when there is none.
+    rdata_min = first_not_none(options.rdata_min, rdata.start if rdata is not None else None, configured_min)
+    rdata_max = first_not_none(options.rdata_max, rdata.end if rdata is not None else None, configured_max)
     if rdata_min is None or rdata_max is None:
         raise ConfigError("rdata range is required when the executable has no .rdata section")
 

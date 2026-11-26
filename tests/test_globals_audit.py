@@ -6,7 +6,7 @@ import pytest
 
 from binary_comp.analyzers.globals import (
     GlobalDecl, GlobalsAuditOptions, audit_globals, configure_globals, format_report,
-    symbolic_struct_array_bytes,
+    numeric_array_bytes, strip_comments, symbolic_struct_array_bytes,
 )
 from binary_comp.config import ProjectTarget
 
@@ -431,3 +431,25 @@ def test_symbolic_struct_array_packs_byte_fields():
 
     assert note == ""
     assert data == bytes([1, 0x03, 0x02, 0xFF, 4, 5, 0, 6])
+
+
+def test_strip_comments_keeps_comment_markers_inside_literals():
+    assert strip_comments('"http://x"; // url') == '"http://x"; '
+    assert strip_comments("'/' /* slash */ + 1") == "'/'  + 1"
+    # An escaped quote does not end the literal, so "/*b*/" is not a comment.
+    assert strip_comments(r'"a\"/*b*/c"') == r'"a\"/*b*/c"'
+
+
+def test_string_array_with_a_url_initializer_is_encoded():
+    decl = GlobalDecl(
+        address=0x00405000,
+        name="g_Url_00405000",
+        statement='char g_Url_00405000[] = "http://x";',
+        line=1,
+        type_text="char",
+        dims=[""],
+        has_initializer=True,
+        initializer='"http://x"',
+    )
+    # strip_comments used to cut the string at "//" and parsing then raised.
+    assert numeric_array_bytes(decl, {}) == (b"http://x\0", "")
