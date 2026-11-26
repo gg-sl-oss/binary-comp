@@ -728,7 +728,7 @@ def merge_ranges(ranges: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ..
 def has_msvc_seh_frame(instrs: list[Instruction]) -> bool:
     """MSVC places EH cleanup funclets after the main body RET."""
     scan = instrs[:12]
-    saw_fs_read = any(instr.mnemonic == "mov" and "fs:" in instr.op_str.lower() for instr in scan)
+    saw_fs_read = any(_fs_mov_side(instr) == "read" for instr in scan)
     saw_sentinel = any(
         instr.mnemonic == "push"
         and instr.operands
@@ -736,8 +736,20 @@ def has_msvc_seh_frame(instrs: list[Instruction]) -> bool:
         and instr.operands[0].imm == -1
         for instr in scan
     )
-    saw_fs_write = any(instr.mnemonic == "mov" and "fs:" in instr.op_str.lower() for instr in instrs[:24])
+    saw_fs_write = any(_fs_mov_side(instr) == "write" for instr in instrs[:24])
     return saw_fs_read and saw_sentinel and saw_fs_write
+
+
+def _fs_mov_side(instr: Instruction) -> str | None:
+    """Return "read" for ``mov reg, fs:[..]``, "write" for ``mov fs:[..], reg``."""
+    if instr.mnemonic != "mov":
+        return None
+    dest, _, source = instr.op_str.lower().partition(",")
+    if "fs:" in dest:
+        return "write"
+    if "fs:" in source:
+        return "read"
+    return None
 
 
 def trim_seh_cleanup_funclets(instrs: list[Instruction]) -> list[Instruction]:

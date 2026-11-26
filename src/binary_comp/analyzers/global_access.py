@@ -665,9 +665,13 @@ def check_global_accesses(
     for function in functions:
         if not os.path.exists(function.asm_path):
             continue
+        # A function split across several original addresses reads globals
+        # from every chunk, so take the union (as calls does).
         original = [
-            token for token in extract_original_global_accesses(
-                function.disasm_path,
+            token
+            for chunk_path in (function.disasm_paths or (function.disasm_path,))
+            for token in extract_original_global_accesses(
+                chunk_path,
                 global_ranges,
                 data_ranges,
                 include_address_immediates=options.include_address_immediates,

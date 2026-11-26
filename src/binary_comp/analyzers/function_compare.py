@@ -590,6 +590,15 @@ class FunctionComparer:
         starts.add(rebuilt_addr)
         return sorted(starts)
 
+    def require_inputs(self) -> None:
+        for path, label in (
+            (self.target.original_exe, "original executable"),
+            (self.target.rebuilt_exe, "rebuilt executable"),
+            (self.target.map_path, "linker map"),
+        ):
+            if not os.path.exists(path):
+                raise FunctionCompareError(f"missing {label}: {path}")
+
     def compare(
         self,
         function_name: str,
@@ -602,16 +611,11 @@ class FunctionComparer:
         if original_addr is None:
             raise FunctionCompareError("could not determine original function address")
 
+        # Check the inputs first: a missing map otherwise reads as an empty
+        # one and reports "function not found in linker map".
+        self.require_inputs()
         if self.rebuilt_address(function_name, original_addr) is None:
             raise FunctionCompareError("function not found in linker map")
-
-        for path, label in (
-            (self.target.original_exe, "original executable"),
-            (self.target.rebuilt_exe, "rebuilt executable"),
-            (self.target.map_path, "linker map"),
-        ):
-            if not os.path.exists(path):
-                raise FunctionCompareError(f"missing {label}: {path}")
 
         original_image = self.pe_image(self.target.original_exe)
         rebuilt_image = self.pe_image(self.target.rebuilt_exe)
@@ -674,16 +678,11 @@ class FunctionComparer:
         addr_paths.sort(key=lambda item: item[0])
         original_addr = addr_paths[0][0]
 
+        # Check the inputs first: a missing map otherwise reads as an empty
+        # one and reports "function not found in linker map".
+        self.require_inputs()
         if self.rebuilt_address(function_name, original_addr) is None:
             raise FunctionCompareError("function not found in linker map")
-
-        for path, label in (
-            (self.target.original_exe, "original executable"),
-            (self.target.rebuilt_exe, "rebuilt executable"),
-            (self.target.map_path, "linker map"),
-        ):
-            if not os.path.exists(path):
-                raise FunctionCompareError(f"missing {label}: {path}")
 
         original_image = self.pe_image(self.target.original_exe)
         rebuilt_image = self.pe_image(self.target.rebuilt_exe)

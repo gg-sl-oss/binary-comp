@@ -180,8 +180,15 @@ original-address annotations.
 }
 ```
 
-Relative paths are resolved from the config file directory. A copy of the
-minimum shape is kept at
+Relative paths are resolved from the config file directory.
+`source_excludes` entries may name a file or a directory; a directory excludes
+everything under it. `map_skip` names a directory to leave out of every source
+walk, matched by whole path components: `"map"` skips `src/map/` but not
+`src/bitmap/`, and `"legacy/map"` skips only that nested directory. (Before,
+both were substring tests: `map` also skipped `src/bitmap/`, and most commands
+ignored a directory in `source_excludes`.)
+
+A copy of the minimum shape is kept at
 [`examples/minimal-binary-comp.json`](examples/minimal-binary-comp.json).
 
 ### Conditional Compilation
@@ -298,7 +305,7 @@ original addresses for external function-pointer initializers. The `data`
 
 | Analyzer | Required target fields | Extra notes |
 | --- | --- | --- |
-| `exe` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | `--functions` uses function annotations and the rebuilt MAP. `library_ranges` can exclude known CRT/library ranges. |
+| `exe` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | `--functions` uses function annotations and the rebuilt MAP. When a source directory has a `map/` subdirectory, its `Function start` comments are the original-function inventory; ASM- and STUB-marked entries are left out there too. `library_ranges` can exclude known CRT/library ranges. |
 | `export-asm` | `original_exe`, `code_export_dir` | Generates Ghidra-style `FUN_*.disassembled.txt` exports with Capstone. Source annotations and an original map are optional boundary inputs; existing Ghidra exports remain compatible. |
 | `compare` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | Also takes one Ghidra-style `FUN_*.disassembled.txt` path. |
 | `report` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs`, `code_export_dir` | Uses one export per annotated original address. Generate them with `export-asm` or Ghidra. |
@@ -308,7 +315,7 @@ original addresses for external function-pointer initializers. The `data`
 | `globals` | `original_exe`, `globals_source` | Optional headers and `auto_complete` broaden coverage. `--check-rebuilt-layout` also needs the rebuilt MAP/assembly for relocation-sensitive access checks. |
 | `calls` | `source_dirs`, `code_export_dir`, `asm_dir` | Compares call target multisets from original exports and rebuilt assembly listings. |
 | `global-access` | `source_dirs`, `code_export_dir`, `asm_dir` | Compares read/write multisets for global data references. |
-| `vtables` | `original_exe`, `source_dirs`, `code_export_dir` | Reads vtable bytes and constructor vptr writes from the original PE. |
+| `vtables` | `original_exe`, `source_dirs`, `code_export_dir` | Reads vtable bytes and constructor vptr writes from the original PE. Vtables are looked for in an address range: `--rdata-min`/`--rdata-max` when given, otherwise the original's `.rdata` section, otherwise `vtables.rdata_range` in the config. The flags used to be ignored whenever `.rdata` existed; they now always take precedence. |
 | `seh` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | Compares MSVC C++ EH FuncInfo metadata for a function or report. |
 
 ## CLI Examples
@@ -329,6 +336,7 @@ binary-comp report --config path/to/binary-comp.json --target full --reasons rea
 binary-comp report --config path/to/binary-comp.json --target full --bytes
 binary-comp order --config path/to/binary-comp.json --target full --no-build
 binary-comp vtables --config path/to/binary-comp.json --target full --dump
+binary-comp vtables --config path/to/binary-comp.json --target full --rdata-min 0x406000 --rdata-max 0x407000
 binary-comp seh --config path/to/binary-comp.json --target full --report
 binary-comp byte-compare ORIGINAL.OVR REBUILT.OVR
 binary-comp mz-compare ORIGINALU.EXE REBUILTU.EXE

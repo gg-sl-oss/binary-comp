@@ -26,6 +26,7 @@ from binary_comp.source.cpp import (
     sanitize_source,
     walk,
 )
+from binary_comp.source.functions import iter_source_files
 
 
 DEFAULT_MAX_FUNCTION_BYTES = 0x4000
@@ -224,18 +225,6 @@ def load_vtable_policy(config: dict[str, Any]) -> VtablePolicy:
             [0],
         ),
     )
-
-
-def iter_source_files(source_dirs: tuple[str, ...], suffixes: tuple[str, ...], map_skip: str | None = None):
-    for source_dir in source_dirs:
-        if not os.path.isdir(source_dir):
-            continue
-        for root, _, files in os.walk(source_dir):
-            if map_skip and map_skip in root:
-                continue
-            for filename in sorted(files):
-                if filename.endswith(suffixes):
-                    yield os.path.join(root, filename)
 
 
 def strip_inline_comments(text: str) -> str:
@@ -441,7 +430,7 @@ def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None):
     explicit_vtables: dict[str, int] = {}
     constructors: dict[str, int] = {}
 
-    for hfile in sorted(iter_source_files(source_dirs, (".h",), map_skip)):
+    for hfile in sorted(iter_source_files(source_dirs, (".h",), map_skip=map_skip)):
         basename = os.path.basename(hfile)
         source, tree = parse_source_tree(hfile)
 
@@ -478,7 +467,7 @@ def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None):
 def find_vtable_addrs_from_headers(source_dirs: tuple[str, ...], map_skip: str | None, rdata_min: int, rdata_max: int) -> set[int]:
     pattern = re.compile(r"\bvtable(?:\s+address)?(?:\s+at)?[:\s]+0x([0-9a-fA-F]+)", re.IGNORECASE)
     addrs = set()
-    for hfile in iter_source_files(source_dirs, (".h",), map_skip):
+    for hfile in iter_source_files(source_dirs, (".h",), map_skip=map_skip):
         source, tree = parse_source_tree(hfile)
         for node in walk(tree.root_node):
             if node.type != "comment":
@@ -510,7 +499,7 @@ def find_source_function_symbols(source_dirs: tuple[str, ...], map_skip: str | N
         if info not in function_symbols[address]:
             function_symbols[address].append(info)
 
-    for srcfile in sorted(iter_source_files(source_dirs, (".cpp", ".h"), map_skip)):
+    for srcfile in sorted(iter_source_files(source_dirs, (".cpp", ".h"), map_skip=map_skip)):
         basename = os.path.basename(srcfile)
         source, tree = parse_source_tree(srcfile)
         class_ranges = []
@@ -532,12 +521,16 @@ def find_source_function_symbols(source_dirs: tuple[str, ...], map_skip: str | N
 
 def find_implemented_functions(source_dirs: tuple[str, ...], map_skip: str | None) -> dict[int, list[tuple[str, int]]]:
     implementations: dict[int, list[tuple[str, int]]] = {}
-    for srcfile in sorted(iter_source_files(source_dirs, (".cpp", ".h"), map_skip)):
+    for srcfile in sorted(iter_source_files(source_dirs, (".cpp", ".h"), map_skip=map_skip)):
         basename = os.path.basename(srcfile)
         for marker in parse_source_function_comments(srcfile, include_no_assembly=True):
             addr = int(marker.address, 16)
             implementations.setdefault(addr, []).append((basename, marker.line))
     return implementations
+
+
+def first_not_none(*values: int | None) -> int | None:
+    return next((value for value in values if value is not None), None)
 
 
 def is_rdata_address(value: int, rdata_min: int, rdata_max: int) -> bool:
@@ -1342,8 +1335,10 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
     rdata = image.section_named(".rdata")
 
     configured_min, configured_max = policy.rdata_range
-    rdata_min = rdata.start if rdata is not None else options.rdata_min if options.rdata_min is not None else configured_min
-    rdata_max = rdata.end if rdata is not None else options.rdata_max if options.rdata_max is not None else configured_max
+    # An explicit --rdata-min/--rdata-max wins; otherwise use the .rdata
+    # section, and fall back to the configured range when there is none.
+    rdata_min = first_not_none(options.rdata_min, rdata.start if rdata is not None else None, configured_min)
+    rdata_max = first_not_none(options.rdata_max, rdata.end if rdata is not None else None, configured_max)
     if rdata_min is None or rdata_max is None:
         raise ConfigError("rdata range is required when the executable has no .rdata section")
 

@@ -19,6 +19,7 @@ from binary_comp.core.mapfile import parse_msvc_map_symbols
 from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import normalize_compiled
 from binary_comp.source.cpp import parse_source_function_groups, parse_source_function_markers
+from binary_comp.source.functions import C_SOURCE_EXTENSIONS, iter_source_files
 
 
 IAT_ADDRESSES: dict[int, str] = {}
@@ -188,7 +189,9 @@ def canonicalize(name: str, policy: CallsPolicy, strict_memory: bool = False) ->
 
 
 def iter_source_address_names(target: ProjectTarget, policy: CallsPolicy):
-    for cpp_file in iter_cpp_files(target.source_dirs, target.map_skip, target.source_excludes):
+    for cpp_file in iter_source_files(
+        target.source_dirs, C_SOURCE_EXTENSIONS, map_skip=target.map_skip, source_excludes=target.source_excludes
+    ):
         for addrs, func_name in iter_source_functions(cpp_file, policy, include_no_assembly=True):
             for addr in addrs:
                 yield addr, func_name
@@ -196,7 +199,9 @@ def iter_source_address_names(target: ProjectTarget, policy: CallsPolicy):
 
 def collect_source_address_markers(target: ProjectTarget, policy: CallsPolicy) -> dict[int, list[SourceAddressMarker]]:
     markers_by_addr: dict[int, list[SourceAddressMarker]] = {}
-    for cpp_file in iter_cpp_files(target.source_dirs, target.map_skip, target.source_excludes):
+    for cpp_file in iter_source_files(
+        target.source_dirs, C_SOURCE_EXTENSIONS, map_skip=target.map_skip, source_excludes=target.source_excludes
+    ):
         occurrence_counts: dict[str, int] = {}
         previous_group: tuple[int, str] | None = None
         occurrence_index = 0
@@ -469,27 +474,6 @@ def apply_call_count_allowances(func_name: str, only_orig: Counter, only_compile
                 only_compiled[name] = remaining
             else:
                 only_compiled.pop(name, None)
-
-
-def iter_cpp_files(
-    source_dirs: tuple[str, ...],
-    map_skip: str | None = None,
-    source_excludes: tuple[str, ...] = (),
-):
-    excluded = {
-        os.path.normcase(os.path.abspath(path))
-        for path in source_excludes
-    }
-    for source_dir in source_dirs:
-        for root, _, files in os.walk(source_dir):
-            if map_skip and map_skip in root:
-                continue
-            for filename in sorted(files):
-                if filename.endswith((".cpp", ".c", ".C")):
-                    path = os.path.join(root, filename)
-                    if os.path.normcase(os.path.abspath(path)) in excluded:
-                        continue
-                    yield path
 
 
 def iter_source_functions(cpp_file: str, policy: CallsPolicy, include_no_assembly: bool = False):
@@ -1029,7 +1013,9 @@ def select_functions(
 
     functions = []
     skipped_no_disasm = []
-    for cpp_file in sorted(iter_cpp_files(target.source_dirs, target.map_skip, target.source_excludes)):
+    for cpp_file in sorted(iter_source_files(
+        target.source_dirs, C_SOURCE_EXTENSIONS, map_skip=target.map_skip, source_excludes=target.source_excludes
+    )):
         occurrences = {}
         for addrs, func_name in iter_source_functions(cpp_file, policy):
             if not matches_filter(func_name, cpp_file, options.filters):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from binary_comp.analyzers.function_compare import (
+    FunctionCompareError,
     FunctionComparer,
     disassemble_exported_function,
     disassemble_function,
@@ -39,6 +40,28 @@ def test_function_compare_decodes_original_and_rebuilt_bytes(fixture_root, sampl
     text = format_comparison(comparison)
     assert "00401000: mov eax, 7" in text
     assert "Similarity: 100.00%" in text
+
+
+def test_function_compare_reports_a_missing_map_as_missing(fixture_root, sample_binaries, tmp_path):
+    original, rebuilt = sample_binaries
+    missing_map = tmp_path / "rebuilt.map"
+    target = ProjectTarget(
+        name="full",
+        original_exe=str(original),
+        rebuilt_exe=str(rebuilt),
+        map_path=str(missing_map),
+        source_dirs=(str(fixture_root / "src"),),
+        code_dir=str(fixture_root / "code"),
+        build=BuildConfig(),
+    )
+    export = str(fixture_root / "code" / "FUN_00401000.disassembled.txt")
+    comparer = FunctionComparer(target)
+
+    # A missing map used to read as an empty one: "function not found in linker map".
+    with pytest.raises(FunctionCompareError, match=f"missing linker map: {missing_map}"):
+        comparer.compare("sample_function", export, build=False)
+    with pytest.raises(FunctionCompareError, match="missing linker map"):
+        comparer.compare_combined("sample_function", [export], build=False)
 
 
 def test_disassemble_export_uses_ghidra_block_layout(tmp_path):
