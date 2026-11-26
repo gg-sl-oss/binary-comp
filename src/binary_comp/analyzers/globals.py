@@ -22,6 +22,7 @@ from binary_comp.core.image import load_image
 from binary_comp.core.le import LEImage
 from binary_comp.core.pe import PEImage
 from binary_comp.source.cpp import make_cpp_parser, node_text, parse_source_functions, sanitize_source, walk
+from binary_comp.source.functions import iter_source_files
 
 
 BASE_TYPE_SIZES = {
@@ -485,11 +486,8 @@ def parse_globals_file(path: str,
     if os.path.isdir(path):
         suffixes = (".h", ".hh", ".hpp", ".hxx") if require_extern else (".c", ".cc", ".cpp", ".cxx")
         result: List[GlobalDecl] = []
-        for root, dirs, files in os.walk(path):
-            dirs.sort()
-            for name in sorted(files):
-                if name.lower().endswith(suffixes):
-                    result.extend(parse_globals_file(os.path.join(root, name), require_extern, address_warnings))
+        for file_path in iter_source_files([path], suffixes, ignore_case=True):
+            result.extend(parse_globals_file(file_path, require_extern, address_warnings))
         return result
     with open(path, "rb") as f:
         source = f.read()
@@ -580,15 +578,9 @@ def parse_code_globals(path: str) -> List[CodeGlobal]:
 
 def parse_function_symbols(src_dir: str) -> Dict[str, int]:
     symbols: Dict[str, int] = {}
-    if not src_dir or not os.path.isdir(src_dir):
-        return symbols
-    for root, _, files in os.walk(src_dir):
-        for filename in files:
-            if not filename.endswith((".c", ".C", ".cpp")):
-                continue
-            path = os.path.join(root, filename)
-            for function in parse_source_functions(path):
-                symbols[function.name] = int(function.address, 16)
+    for path in iter_source_files([src_dir], (".c", ".C", ".cpp")):
+        for function in parse_source_functions(path):
+            symbols[function.name] = int(function.address, 16)
     return symbols
 
 
@@ -1662,21 +1654,11 @@ DISASM_REGISTER_SIZES = {
 def iter_source_scan_files(source_dirs: Sequence[str],
                            source_excludes: Sequence[str]) -> Iterable[str]:
     suffixes = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
-    excludes = tuple(source_excludes)
-    for source_dir in source_dirs:
-        if not source_dir or not os.path.isdir(source_dir):
-            continue
-        for root, dirs, files in os.walk(source_dir):
-            if excludes and any(exclude and exclude in root for exclude in excludes):
-                dirs[:] = []
-                continue
-            for filename in files:
-                if not filename.endswith(suffixes):
-                    continue
-                path = os.path.join(root, filename)
-                if excludes and any(exclude and exclude in path for exclude in excludes):
-                    continue
-                yield path
+    yield from iter_source_files(
+        source_dirs,
+        suffixes,
+        source_excludes=[exclude for exclude in source_excludes if exclude],
+    )
 
 
 def mask_comments_for_layout_scan(text: str) -> str:
