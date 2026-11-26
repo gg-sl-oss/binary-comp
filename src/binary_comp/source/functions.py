@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable, Iterator
 
 from binary_comp.core.mapfile import MapEntry, parse_msvc_map_by_obj
 from binary_comp.core.symbols import normalize_compiled, symbol_matches, symbol_patterns_for_function
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from binary_comp.config import ProjectTarget
 
 SOURCE_EXTENSIONS = (".cpp", ".c", ".C", ".asm")
+C_SOURCE_EXTENSIONS = (".cpp", ".c", ".C")
 
 
 @dataclass(frozen=True)
@@ -28,25 +29,66 @@ class FunctionGroup:
     rebuilt_symbol: str
 
 
-def iter_cpp_files_excluding(
-    source_dirs: tuple[str, ...],
+def iter_source_files(
+    source_dirs: Iterable[str | None],
+    extensions: tuple[str, ...] = SOURCE_EXTENSIONS,
+    *,
     map_skip: str | None = None,
-    source_excludes: tuple[str, ...] = (),
-):
-    excluded = {
-        os.path.normcase(os.path.abspath(path))
-        for path in source_excludes
-    }
+    source_excludes: Iterable[str] = (),
+    ignore_case: bool = False,
+) -> Iterator[str]:
+    """Files under ``source_dirs`` with one of ``extensions``, in sorted order.
+
+    Paths are matched by whole components. A directory is skipped when
+    ``map_skip`` (``map``, or ``legacy/map``) names some of its components,
+    so ``map`` skips ``src/map`` but not ``src/bitmap``. An entry of
+    ``source_excludes`` excludes that file, or everything under that
+    directory. Missing directories are ignored.
+    """
+    excluded = tuple(_comparable(path) for path in source_excludes)
+    skip = _components(map_skip) if map_skip else None
+    suffixes = tuple(extension.lower() for extension in extensions) if ignore_case else extensions
     for source_dir in source_dirs:
-        for root, _, files in os.walk(source_dir):
-            if map_skip and map_skip in root:
+        if not source_dir or not os.path.isdir(source_dir):
+            continue
+        for root, dirs, files in os.walk(source_dir):
+            if (skip and _contains_components(_components(root), skip)) or _is_excluded(root, excluded):
+                dirs[:] = []
                 continue
+            dirs.sort()
             for filename in sorted(files):
-                if filename.endswith(SOURCE_EXTENSIONS):
-                    path = os.path.join(root, filename)
-                    if os.path.normcase(os.path.abspath(path)) in excluded:
-                        continue
-                    yield path
+                name = filename.lower() if ignore_case else filename
+                if not name.endswith(suffixes):
+                    continue
+                path = os.path.join(root, filename)
+                if _is_excluded(path, excluded):
+                    continue
+                yield path
+
+
+def _comparable(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _components(path: str) -> tuple[str, ...]:
+    return tuple(part for part in os.path.normcase(path).replace("\\", "/").split("/") if part)
+
+
+def _contains_components(parts: tuple[str, ...], wanted: tuple[str, ...]) -> bool:
+    width = len(wanted)
+    return any(parts[index:index + width] == wanted for index in range(len(parts) - width + 1))
+
+
+def _is_excluded(path: str, excluded: tuple[str, ...]) -> bool:
+    if not excluded:
+        return False
+    candidate = _comparable(path)
+    return any(candidate == item or candidate.startswith(item.rstrip(os.sep) + os.sep) for item in excluded)
+
+
+def source_object_name(source_path: str) -> str:
+    """The object file a source compiles to: ``src/door.cpp`` -> ``door.obj``."""
+    return os.path.splitext(os.path.basename(source_path))[0] + ".obj"
 
 
 def load_source_groups(
@@ -56,7 +98,7 @@ def load_source_groups(
     signature_names: frozenset[str] = frozenset(),
 ) -> dict[str, list[SourceFunctionGroup]]:
     groups_by_source: dict[str, list[SourceFunctionGroup]] = {}
-    for path in iter_cpp_files_excluding(source_dirs, map_skip, source_excludes):
+    for path in iter_source_files(source_dirs, map_skip=map_skip, source_excludes=source_excludes):
         groups = parse_source_function_groups(
             path, include_no_assembly=False, signature_names=signature_names
         )
@@ -93,7 +135,7 @@ def map_source_groups(
         entries.sort(key=lambda entry: entry.va)
 
     for source_path in sorted(groups_by_source):
-        obj = os.path.splitext(os.path.basename(source_path))[0] + ".obj"
+        obj = source_object_name(source_path)
         obj_entries = entries_by_member.get(obj.lower(), [])
         used: set[int] = set()
 
@@ -164,16 +206,12 @@ def build_source_function_address_map(
         for entry in parse_watcom_map_symbols(target.map_path, image.segment_bases()):
             symbols.setdefault(entry.symbol, set()).add(entry.va)
         mapping: dict[int, int] = {}
-        for directory in target.source_dirs:
-            for root, _dirs, files in os.walk(directory):
-                for filename in files:
-                    if not filename.lower().endswith((".c", ".cc", ".cpp", ".cxx")):
-                        continue
-                    for function in parse_source_functions(os.path.join(root, filename)):
-                        names = (function.name, function.name + "_", "_" + function.name, function.name.upper())
-                        matches = set().union(*(symbols.get(name, set()) for name in names))
-                        if len(matches) == 1:
-                            mapping[int(function.address, 16)] = next(iter(matches))
+        for path in iter_source_files(target.source_dirs, (".c", ".cc", ".cpp", ".cxx"), ignore_case=True):
+            for function in parse_source_functions(path):
+                names = (function.name, function.name + "_", "_" + function.name, function.name.upper())
+                matches = set().union(*(symbols.get(name, set()) for name in names))
+                if len(matches) == 1:
+                    mapping[int(function.address, 16)] = next(iter(matches))
         for name, address in (function_addresses or {}).items():
             names = (name, name + "_", "_" + name, name.upper())
             matches = set().union(*(symbols.get(symbol, set()) for symbol in names))

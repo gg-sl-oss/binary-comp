@@ -20,6 +20,15 @@ _PRIMITIVE_TYPES = {
 }
 
 
+# MSVC decorated names. Matched from the start of the symbol.
+VFTABLE_SYMBOL_RE = re.compile(r"^\?\?_7(?P<cls>\w+)@@6B")
+DELETING_DTOR_SYMBOL_RE = re.compile(r"^\?\?_[EG](?P<cls>\w+)@@")
+DTOR_SYMBOL_RE = re.compile(r"^\?\?1(?P<cls>\w+)@@")
+CTOR_SYMBOL_RE = re.compile(r"^\?\?0(?P<cls>\w+)@@")
+METHOD_SYMBOL_RE = re.compile(r"^\?(?P<method>\w+)@(?P<cls>\w+)@@")
+FREE_FUNCTION_SYMBOL_RE = re.compile(r"^\?(?P<name>\w+)@@")
+
+
 def split_name_parameters(name: str) -> str:
     return name.split("(", 1)[0]
 
@@ -100,28 +109,28 @@ def normalize_compiled(name: str, signature_names: frozenset[str] = frozenset())
     """
     name = name.strip()
     if name.startswith("??0") and "@@" in name:
-        match = re.match(r"\?\?0(\w+)@@", name)
+        match = CTOR_SYMBOL_RE.match(name)
         if match:
-            return f"{match.group(1)}::{match.group(1)}"
+            return f"{match.group('cls')}::{match.group('cls')}"
     if name.startswith("??1") and "@@" in name:
-        match = re.match(r"\?\?1(\w+)@@", name)
+        match = DTOR_SYMBOL_RE.match(name)
         if match:
-            return f"{match.group(1)}::~{match.group(1)}"
+            return f"{match.group('cls')}::~{match.group('cls')}"
     if name.startswith("??2@"):
         return "operator_new"
     if name.startswith("??3@"):
         return "operator_delete"
     if name.startswith("?") and "@@" in name:
-        match = re.match(r"\?(\w+)@(\w+)@@", name)
+        match = METHOD_SYMBOL_RE.match(name)
         if match:
-            normalized = f"{match.group(2)}::{match.group(1)}"
+            normalized = f"{match.group('cls')}::{match.group('method')}"
             if normalized in signature_names:
                 parameters = _decode_msvc_parameters(name[match.end():])
                 return f"{normalized}({','.join(parameters)})"
             return normalized
-        match = re.match(r"\?(\w+)@@", name)
+        match = FREE_FUNCTION_SYMBOL_RE.match(name)
         if match:
-            return match.group(1)
+            return match.group("name")
     if name.startswith("_") and "::" not in name and "@" not in name:
         return name[1:]
     match = re.match(r"@([\w]+)@\d+", name)
@@ -165,12 +174,6 @@ def symbol_patterns_for_function(name: str, toolchain: str = "msvc") -> list[str
 def symbol_matches(mangled: str, patterns: list[str]) -> bool:
     return any(pattern == mangled or mangled.startswith(pattern) or pattern in mangled for pattern in patterns)
 
-
-VFTABLE_SYMBOL_RE = re.compile(r"^\?\?_7(?P<cls>\w+)@@6B")
-DELETING_DTOR_SYMBOL_RE = re.compile(r"^\?\?_[EG](?P<cls>\w+)@@")
-DTOR_SYMBOL_RE = re.compile(r"^\?\?1(?P<cls>\w+)@@")
-CTOR_SYMBOL_RE = re.compile(r"^\?\?0(?P<cls>\w+)@@")
-METHOD_SYMBOL_RE = re.compile(r"^\?(?P<method>\w+)@(?P<cls>\w+)@@")
 
 # An original address kept at the end of a name: g_Table_00402000, or the
 # decorated ?g_Table_00402000@@3PAHA. Six to eight hex digits after an

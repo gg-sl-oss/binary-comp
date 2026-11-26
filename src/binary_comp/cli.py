@@ -220,8 +220,8 @@ def add_vtables_parser(subparsers) -> None:
     )
     parser.add_argument("--dump", action="store_true", help="Show full vtable dump")
     parser.add_argument("--class", dest="filter_class", help="Filter to specific class")
-    parser.add_argument("--rdata-min", type=hex_int, help="Fallback .rdata start address")
-    parser.add_argument("--rdata-max", type=hex_int, help="Fallback .rdata end address")
+    parser.add_argument("--rdata-min", type=hex_int, help="Vtable address range start (default: the .rdata section)")
+    parser.add_argument("--rdata-max", type=hex_int, help="Vtable address range end (default: the .rdata section)")
     parser.add_argument(
         "--no-rebuilt",
         dest="check_rebuilt",

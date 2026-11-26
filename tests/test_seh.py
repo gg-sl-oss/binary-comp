@@ -279,6 +279,25 @@ def test_find_funcinfo_accepts_vc6_push_first_prologue(tmp_path):
     assert find_funcinfo(PEImage(str(exe)), TEXT_VA) == 0x401050
 
 
+def test_find_funcinfo_returns_none_for_a_non_immediate_handler_thunk(tmp_path):
+    pytest.importorskip("capstone")
+    blob = bytearray(b"\x90" * 0x80)
+    blob[0:22] = bytes([
+        0x6A, 0xFF,                             # push -1
+        0x68, 0x40, 0x10, 0x40, 0x00,           # push 0x401040 (ehhandler)
+        0x64, 0xA1, 0, 0, 0, 0,                 # mov eax, fs:[0]
+        0x50,                                   # push eax
+        0x64, 0x89, 0x25, 0, 0, 0, 0,           # mov fs:[0], esp
+        0xC3,                                   # ret
+    ])
+    blob[0x40:0x47] = bytes([0x89, 0xC8, 0xE9, 0, 0, 0, 0])  # mov eax, ecx; jmp
+
+    exe = tmp_path / "register_thunk.exe"
+    write_tiny_pe(exe, bytes(blob))
+    # Used to raise ValueError parsing "ecx" as hex.
+    assert find_funcinfo(PEImage(str(exe)), TEXT_VA) is None
+
+
 def test_find_funcinfo_returns_none_without_eh_frame(tmp_path):
     pytest.importorskip("capstone")
     # default tiny PE function is `mov eax,7; cmp eax,7; ret` — no EH prologue
