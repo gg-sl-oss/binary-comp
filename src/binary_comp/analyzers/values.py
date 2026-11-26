@@ -146,8 +146,10 @@ def relocated_displacement(instr: Instruction, sites: frozenset[int]) -> bool:
 
 
 def relocated_immediate(instr: Instruction, sites: frozenset[int]) -> bool:
-    """Is this instruction's immediate one the loader patches?  Then it is an
-    unresolved address rather than a value the source chose."""
+    """Is this instruction's immediate one the loader patches?
+
+    Then it is an unresolved address rather than a value the source chose.
+    """
     return bool(sites) and instr.imm_offset > 0 and \
         (instr.address + instr.imm_offset) in sites
 
@@ -901,7 +903,7 @@ def register_has_literal_pointer_origin(
 
     MSVC sometimes chooses a different element of a global array as its loop
     base, then compensates every indexed access by the same displacement.  The
-    original Arthur binary also spills that base to a stack slot while the
+    original binary may also spill that base to a stack slot while the
     reconstruction keeps it in a register, so follow those simple spills.
     """
     origins: dict[str, bool] = {}
@@ -2548,8 +2550,8 @@ def block_literal_anchors(
 ) -> frozenset[str]:
     """Literal strings in the straight-line region containing ``idx``.
 
-    A nearby unique dialogue line is a stable semantic anchor for the small
-    animation values surrounding it.  Calls remain inside the region, while
+    A nearby unique string literal is a stable semantic anchor for the small
+    constant values surrounding it.  Calls remain inside the region, while
     control-flow boundaries prevent unrelated switch cases from lending each
     other anchors.
     """
@@ -2777,7 +2779,7 @@ def equivalent_reordered_push_values(
 
     Reconciliation is deliberately bidirectional and requires the same call,
     argument position, and a shared literal anchor on both sides.  A genuinely
-    changed argument next to the same dialogue therefore remains reportable;
+    changed argument next to the same string therefore remains reportable;
     only values that can each be placed in their matching semantic region are
     ignored.
     """
@@ -2834,7 +2836,7 @@ def equivalent_reordered_push_values(
     if original_anchors and not compiled_anchors and original_relocated:
         return True
 
-    # Large switch functions can share dialogue tails without leaving a
+    # Large switch functions can share common tails without leaving a
     # literal in each individual basic block.  In that case compare the value
     # multiplicities for the same call and argument position.  Values that are
     # fully accounted for on both sides are merely paired with the wrong case
@@ -3506,8 +3508,9 @@ def value_aware_align(
     """Prefer exact-value anchors, then align mnemonic-only gaps.
 
     Plain mnemonic LCS has many equally optimal solutions in switch-heavy
-    functions.  It can consequently compare an event's argument load with its
-    event-code load even when exact counterparts for both exist.  Exact tokens
+    functions.  It can consequently compare a call argument's load with an
+    unrelated load from another case even when exact counterparts for both
+    exist.  Exact tokens
     select stable anchors; mnemonic alignment inside the gaps still exposes a
     genuinely changed value instead of dropping it from comparison.
     """
@@ -3799,8 +3802,11 @@ def format_summary(summary: ValuesSummary, min_similarity: float = 0.0,
 
 
 def format_similarity_breakdown(summary: ValuesSummary) -> str:
-    """Per-source instruction similarity, so one run answers how close the
-    whole project is as well as which values are wrong."""
+    """Report instruction similarity per source file.
+
+    One run then answers how close the whole project is as well as which
+    values are wrong.
+    """
     by_source: dict[str, list[float]] = {}
     for source_path, value in summary.similarity:
         by_source.setdefault(os.path.basename(source_path), []).append(value)
