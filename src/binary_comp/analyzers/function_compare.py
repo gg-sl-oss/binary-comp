@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 from binary_comp.build import maybe_build
 from binary_comp.config import ConfigError, ProjectTarget
@@ -12,12 +13,15 @@ from binary_comp.core.disasm import (
     Instruction,
     disassemble_x86,
     has_msvc_seh_frame,
+    is_indexed_jump_table_operand,
+    read_jump_table,
     unsigned32,
 )
 from binary_comp.core.ghidra import export_address, find_export, read_export_body
 from binary_comp.core.mapfile import function_starts_from_map, parse_msvc_map_by_obj
 from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import (
+    DELETING_DTOR_SYMBOL_RE,
     canonical_function_name,
     symbol_matches,
     symbol_patterns_for_function,
@@ -168,49 +172,42 @@ def switch_jump_targets(
         return []
 
     operand = instr.operands[0]
-    if operand.kind != "mem":
-        return []
-    if operand.base or not operand.index or operand.scale != 4:
+    if not is_indexed_jump_table_operand(operand):
         return []
 
+    # MSVC places the table after the function's code, inside its range.
     table = unsigned32(operand.disp)
     if not (func_start <= table < func_end):
         return []
-
-    targets = []
-    cursor = table
-    while cursor + 4 <= func_end:
-        raw = image.read(cursor, 4)
-        if raw is None or len(raw) != 4:
-            break
-        target = int.from_bytes(raw, "little")
-        if not (func_start <= target < func_end):
-            break
-        targets.append(target)
-        cursor += 4
-    return targets
+    return read_jump_table(image, table, func_start, func_end, table_end=func_end, max_entries=None)
 
 
 def instruction_size(image: PEImage, instr: Instruction) -> int:
+    """The encoded length of ``instr``.
+
+    Decoded instructions carry their size; only hand-built ones (size 0)
+    are decoded again from the image.
+    """
+    if instr.size:
+        return instr.size
+    data = image.read(instr.address, 15)
+    if not data:
+        return 0
+    decoded = next(_decoder().disasm(data, instr.address, count=1), None)
+    return decoded.size if decoded is not None else 0
+
+
+@lru_cache(maxsize=1)
+def _decoder():
     try:
         from capstone import CS_ARCH_X86, CS_MODE_32, Cs
     except ImportError as exc:
         raise RuntimeError("capstone is required") from exc
-
-    data = image.read(instr.address, 15)
-    if not data:
-        return 0
-    md = Cs(CS_ARCH_X86, CS_MODE_32)
-    decoded = next(md.disasm(data, instr.address), None)
-    return decoded.size if decoded is not None else 0
+    return Cs(CS_ARCH_X86, CS_MODE_32)
 
 
 def has_fallthrough(image: PEImage, instr: Instruction) -> bool:
-    if instr.mnemonic == "ret":
-        return False
-    if instr.mnemonic == "jmp":
-        return False
-    if instr.mnemonic in {"int", "int3"}:
+    if instr.mnemonic in {"ret", "jmp", "int", "int3"}:
         return False
     return instruction_size(image, instr) != 0
 
@@ -256,8 +253,7 @@ def reachable_instruction_indices(
 
         if has_fallthrough(image, instr) and index + 1 < len(instrs):
             next_instr = instrs[index + 1]
-            size = instruction_size(image, instr)
-            if size and next_instr.address == instr.address + size:
+            if next_instr.address == instr.address + instruction_size(image, instr):
                 pending.append(index + 1)
 
     return reachable
@@ -536,12 +532,12 @@ class FunctionComparer:
             return ordered
 
         class_leaf = class_name.rsplit("::", 1)[-1]
-        variant_prefixes = (f"??_G{class_leaf}@@", f"??_E{class_leaf}@@")
         for entries in self.map_entries().values():
             for entry in entries:
                 if entry.va in seen:
                     continue
-                if any(entry.symbol.startswith(prefix) for prefix in variant_prefixes):
+                deleting = DELETING_DTOR_SYMBOL_RE.match(entry.symbol)
+                if deleting and deleting.group("cls") == class_leaf:
                     seen.add(entry.va)
                     ordered.append(entry.va)
         return ordered
@@ -605,49 +601,8 @@ class FunctionComparer:
         disassembled_code_path: str,
         build: bool = True,
     ) -> FunctionComparison:
-        maybe_build(self.target, build)
-
-        original_addr = export_address(disassembled_code_path)
-        if original_addr is None:
-            raise FunctionCompareError("could not determine original function address")
-
-        # Check the inputs first: a missing map otherwise reads as an empty
-        # one and reports "function not found in linker map".
-        self.require_inputs()
-        if self.rebuilt_address(function_name, original_addr) is None:
-            raise FunctionCompareError("function not found in linker map")
-
-        original_image = self.pe_image(self.target.original_exe)
-        rebuilt_image = self.pe_image(self.target.rebuilt_exe)
-
-        original = disassemble_exported_function(
-            original_image,
-            disassembled_code_path,
-            original_addr,
-            self.max_bytes,
-            self.padding_mnemonics,
-        )
-        if not original.instructions:
-            raise FunctionCompareError("could not disassemble original bytes")
-
-        best = self._best_candidate(
-            function_name,
-            original_addr,
-            instruction_mnemonics(original.instructions),
-            rebuilt_image,
-        )
-        if best is None:
-            raise FunctionCompareError("function found but could not disassemble rebuilt bytes")
-        rebuilt_addr, rebuilt, similarity = best
-
-        return FunctionComparison(
-            function_name=function_name,
-            original_addr=original_addr,
-            rebuilt_addr=rebuilt_addr,
-            similarity=similarity,
-            rebuilt=rebuilt,
-            original=original,
-        )
+        """Compare one rebuilt function against one original export."""
+        return self.compare_combined(function_name, [disassembled_code_path], build)
 
     def compare_combined(
         self,
@@ -655,7 +610,7 @@ class FunctionComparer:
         disassembled_code_paths: list[str],
         build: bool = True,
     ) -> FunctionComparison:
-        """Compare one rebuilt function against several original pieces at once.
+        """Compare one rebuilt function against one or more original pieces.
 
         MSVC SEH functions are exported by Ghidra as multiple contiguous chunks
         (a short FS-frame prologue followed by the body), and the source carries

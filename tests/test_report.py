@@ -229,3 +229,85 @@ def test_report_cli_invalid_reasons_returns_error(tmp_path, capsys):
     output = capsys.readouterr()
     assert "expected CSV columns" in output.err
     assert "Recorded reasons" not in output.out
+
+
+def _report_project(tmp_path, source, map_text, exports, original_bytes=None, asm=None):
+    original = tmp_path / "original.exe"
+    write_tiny_pe(original, original_bytes)
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "unit.cpp").write_text(source)
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(map_text)
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    for address, body in exports.items():
+        (code_dir / f"FUN_{address:08X}.disassembled.txt").write_text(
+            f"Function: FUN_{address:08X}\nAddress: 0x{address:08X}\n\n" + "\n".join(body) + "\n"
+        )
+    asm_dir = None
+    if asm is not None:
+        asm_dir = tmp_path / "asm"
+        asm_dir.mkdir()
+        (asm_dir / "unit.asm").write_text(asm)
+    return ProjectTarget(
+        name="full",
+        original_exe=str(original),
+        rebuilt_exe=str(original),
+        map_path=str(map_path),
+        source_dirs=(str(src_dir),),
+        code_dir=str(code_dir),
+        asm_dir=str(asm_dir) if asm_dir else None,
+        build=BuildConfig(),
+    )
+
+
+def test_similarity_report_scores_duplicate_instances_separately(tmp_path):
+    """Several alike original pieces are copies of one function: one row each."""
+    pytest.importorskip("capstone")
+    copy = b"\x40" * 9 + b"\xC3"  # INC EAX x9; RET
+    original_bytes = copy + b"\xCC" * (0x40 - len(copy)) + copy
+    body = ["INC EAX"] * 9 + ["RET"]
+    target = _report_project(
+        tmp_path,
+        "/* Function start: 0x00401000 */\n/* Function start: 0x00401040 */\nint dup() { return 0; }\n",
+        " 0001:00000000       _dup 00401000 f unit.obj\n"
+        " 0001:00000020       _boundary 00401020 f unit.obj\n",
+        {0x401000: body, 0x401040: body},
+        original_bytes,
+    )
+
+    report = generate_similarity_report(target, SimilarityReportOptions(build=False))
+
+    assert [(row.address, row.similarity) for row in report.rows] == [
+        (0x401000, pytest.approx(100.0)),
+        (0x401040, pytest.approx(100.0)),
+    ]
+    assert report.compared == 2
+    assert report.at_100 == 2
+
+
+def test_similarity_report_falls_back_to_the_compiler_listing(tmp_path):
+    """A function missing from the map is scored against its .asm listing."""
+    pytest.importorskip("capstone")
+    target = _report_project(
+        tmp_path,
+        "/* Function start: 0x00401000 */\nint seven() { return 7; }\n",
+        " 0001:00000010       _other 00401010 f unit.obj\n",
+        {0x401000: ["MOV EAX,0x7", "CMP EAX,0x7", "RET"]},
+        asm=(
+            "_TEXT SEGMENT\n"
+            "_seven PROC NEAR ; seven\n"
+            "\tmov\teax, 7\n"
+            "\tcmp\teax, 7\n"
+            "\tret\t0\n"
+            "_seven ENDP\n"
+            "_TEXT ENDS\n"
+        ),
+    )
+
+    report = generate_similarity_report(target, SimilarityReportOptions(build=False))
+
+    assert [(row.address, row.status) for row in report.rows] == [(0x401000, "100.00%")]
+    assert report.asm_fallbacks == 1
+    assert report.errors == 0

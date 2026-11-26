@@ -48,12 +48,9 @@ class ByteComparison:
 
 
 def instruction_bytes(image: PEImage, instr: Instruction) -> bytes:
-    size = instr.size
-    if not size:
-        from binary_comp.analyzers.function_compare import instruction_size
+    from binary_comp.analyzers.function_compare import instruction_size
 
-        size = instruction_size(image, instr)
-    return image.read(instr.address, size) or b""
+    return image.read(instr.address, instruction_size(image, instr)) or b""
 
 
 def branch_target(instr: Instruction) -> int | None:

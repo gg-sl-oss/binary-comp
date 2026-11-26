@@ -6,7 +6,7 @@ import csv
 import os
 import re
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from binary_comp.analyzers.function_compare import (
     FunctionCompareError,
@@ -144,231 +144,261 @@ def compare_asm_fallback(
     return mnemonic_similarity(compiled_mnemonics, original_mnemonics)
 
 
+# A score at or above this counts as a perfect match (the 100% bucket).
+EXACT_MATCH_SIMILARITY = 99.99
+# Scores below this are listed with their recorded reasons.
+HIGH_SIMILARITY = 90.0
+# Original pieces of one source function this alike, each at least this
+# many instructions long, are duplicate instances rather than SEH chunks.
+DUPLICATE_INSTANCE_SIMILARITY = 80.0
+MIN_DUPLICATE_INSTANCE_MNEMONICS = 8
+
+_COMPARE_ERRORS = (FunctionCompareError, FileNotFoundError, RuntimeError, ValueError)
+
+
+@dataclass
+class _Tally:
+    """Rows and running totals for a similarity report."""
+
+    rows: list[SimilarityReportRow] = field(default_factory=list)
+    compared: int = 0
+    similarity_sum: float = 0.0
+    at_100: int = 0
+    above_90: int = 0
+    below_90: int = 0
+    errors: int = 0
+    missing_asm: int = 0
+    asm_fallbacks: int = 0
+
+    def add_score(
+        self,
+        source_file: str,
+        function_name: str,
+        address: int,
+        similarity: float,
+        byte_comparison: ByteComparison | None = None,
+    ) -> None:
+        self.compared += 1
+        self.similarity_sum += similarity
+        if similarity >= EXACT_MATCH_SIMILARITY:
+            self.at_100 += 1
+        if similarity >= HIGH_SIMILARITY:
+            self.above_90 += 1
+        else:
+            self.below_90 += 1
+        self.rows.append(SimilarityReportRow(
+            source_file,
+            function_name,
+            address,
+            similarity,
+            f"{similarity:.2f}%",
+            byte_comparison,
+        ))
+
+    def add_not_found(self, source_file: str, function_name: str, address: int) -> None:
+        self.errors += 1
+        self.rows.append(SimilarityReportRow(source_file, function_name, address, None, "NOT FOUND"))
+
+    def add_missing_asm(self, source_file: str, function_name: str, address: int) -> None:
+        self.missing_asm += 1
+        self.rows.append(SimilarityReportRow(source_file, function_name, address, None, "MISSING ASM"))
+
+    def report(self) -> SimilarityReport:
+        return SimilarityReport(
+            rows=tuple(self.rows),
+            compared=self.compared,
+            similarity_sum=self.similarity_sum,
+            at_100=self.at_100,
+            above_90=self.above_90,
+            below_90=self.below_90,
+            errors=self.errors,
+            missing_asm=self.missing_asm,
+            asm_fallbacks=self.asm_fallbacks,
+        )
+
+
+class _ReportBuilder:
+    """Compares each annotated source function and records the results."""
+
+    def __init__(self, target: ProjectTarget, options: SimilarityReportOptions):
+        self.target = target
+        self.options = options
+        self.comparer = FunctionComparer(
+            target,
+            canonical_aliases=options.canonical_aliases,
+            signature_overloads=options.signature_overloads,
+        )
+        self.original_image = PEImage(target.original_exe)
+        self.max_bytes, self.padding_mnemonics = load_disassembly_policy(target)
+        self.original_starts = function_starts_from_export_dir(target.code_dir) if options.compare_bytes else []
+        self.rebuilt_starts = (
+            function_starts_from_map(self.comparer.map_entries()) if options.compare_bytes else []
+        )
+        self.tally = _Tally()
+
+    def byte_comparison(self, comparison) -> ByteComparison | None:
+        if (
+            not self.options.compare_bytes
+            or not comparison.original.instructions
+            or not comparison.rebuilt.instructions
+        ):
+            return None
+        original_last = max(instr.address for instr in comparison.original.instructions)
+        rebuilt_last = max(instr.address for instr in comparison.rebuilt.instructions)
+        return compare_function_bytes(
+            self.original_image,
+            comparison.original.instructions,
+            self.comparer.pe_image(self.target.rebuilt_exe),
+            comparison.rebuilt.instructions,
+            original_end=_next_start(self.original_starts, original_last),
+            rebuilt_end=_next_start(self.rebuilt_starts, rebuilt_last),
+        )
+
+    def add_comparison(self, source_file: str, function_name: str, address: int, comparison) -> None:
+        self.tally.add_score(
+            source_file,
+            function_name,
+            address,
+            comparison.similarity,
+            self.byte_comparison(comparison),
+        )
+
+    def compare_group(self, source_path: str, group, occurrence_index: int) -> None:
+        source_file = os.path.basename(source_path)
+        # A group with several addresses is compared as a whole when every
+        # piece has an export; otherwise each address gets its own row.
+        if len(group.addresses) > 1 and self.compare_multi_address_group(source_file, group):
+            return
+        for address_text in group.addresses:
+            self.compare_address(source_path, group, occurrence_index, int(address_text, 16))
+
+    def compare_multi_address_group(self, source_file: str, group) -> bool:
+        """Compare a group with several original addresses; False if a piece is missing.
+
+        MSVC SEH functions are exported by Ghidra as several contiguous chunks
+        (a short FS-frame prologue + the body), each carrying its own "Function
+        start:" annotation, so a single source function ends up with multiple
+        original addresses. The rebuilt binary has ONE function, so compare it
+        once against the concatenated chunks instead of measuring each chunk
+        separately (which makes the prologue chunk a spurious ~5% row that also
+        drags the average down).
+
+        The other case is N duplicate instances of the same function (e.g.
+        identical non-COMDAT methods emitted once per class/TU); each of those
+        gets its own row.
+        """
+        chunk_paths: list[str] = []
+        for address_text in group.addresses:
+            path = resolve_export(self.target.code_dir, int(address_text, 16))
+            if path is None or not os.path.exists(path):
+                return False
+            chunk_paths.append(path)
+
+        if self.are_duplicate_instances(group.addresses, chunk_paths):
+            for address_text, path in zip(group.addresses, chunk_paths):
+                address = int(address_text, 16)
+                try:
+                    comparison = self.comparer.compare(group.name, path, build=False)
+                except _COMPARE_ERRORS:
+                    self.tally.add_not_found(source_file, group.name, address)
+                    continue
+                self.add_comparison(source_file, group.name, address, comparison)
+            return True
+
+        entry_address = min(int(address_text, 16) for address_text in group.addresses)
+        try:
+            comparison = self.comparer.compare_combined(group.name, chunk_paths, build=False)
+        except _COMPARE_ERRORS:
+            self.tally.add_not_found(source_file, group.name, entry_address)
+        else:
+            self.add_comparison(source_file, group.name, entry_address, comparison)
+        return True
+
+    def are_duplicate_instances(self, addresses: list[str], chunk_paths: list[str]) -> bool:
+        """Whether the original pieces are copies of one function, not SEH chunks.
+
+        Chunks of an SEH split look nothing alike, while duplicate instances
+        share the same mnemonic stream, so compare the pieces pairwise.
+        """
+        chunk_mnemonics: list[list[str]] = []
+        for address_text, path in zip(addresses, chunk_paths):
+            try:
+                piece = disassemble_exported_function(
+                    self.original_image,
+                    path,
+                    int(address_text, 16),
+                    self.max_bytes,
+                    self.padding_mnemonics,
+                )
+            except (FileNotFoundError, RuntimeError, ValueError):
+                return False
+            chunk_mnemonics.append(instruction_mnemonics(piece.instructions))
+        return (
+            all(len(mnemonics) >= MIN_DUPLICATE_INSTANCE_MNEMONICS for mnemonics in chunk_mnemonics)
+            and all(
+                mnemonic_similarity(chunk_mnemonics[0], mnemonics) >= DUPLICATE_INSTANCE_SIMILARITY
+                for mnemonics in chunk_mnemonics[1:]
+            )
+        )
+
+    def compare_address(self, source_path: str, group, occurrence_index: int, address: int) -> None:
+        source_file = os.path.basename(source_path)
+        path = resolve_export(self.target.code_dir, address)
+        if path is None or not os.path.exists(path):
+            self.tally.add_missing_asm(source_file, group.name, address)
+            return
+
+        try:
+            comparison = self.comparer.compare(group.name, path, build=False)
+        except _COMPARE_ERRORS:
+            similarity = compare_asm_fallback(
+                self.target,
+                self.original_image,
+                source_path,
+                group.name,
+                occurrence_index,
+                address,
+                path,
+                self.max_bytes,
+                self.padding_mnemonics,
+            )
+            if similarity is None:
+                self.tally.add_not_found(source_file, group.name, address)
+                return
+            self.tally.asm_fallbacks += 1
+            self.tally.add_score(source_file, group.name, address, similarity)
+            return
+        self.add_comparison(source_file, group.name, address, comparison)
+
+
+def _next_start(starts: list[int], address: int) -> int | None:
+    index = bisect_right(starts, address)
+    return starts[index] if index < len(starts) else None
+
+
+def _groups_matching_filter(source_path: str, groups: list, file_filter: str | None) -> list:
+    """All groups when the file matches ``file_filter``, else those whose name does."""
+    source_file = os.path.basename(source_path)
+    if file_filter and file_filter not in source_file and file_filter not in source_path:
+        return [group for group in groups if file_filter in group.name]
+    return groups
+
+
 def generate_similarity_report(
     target: ProjectTarget,
     options: SimilarityReportOptions = SimilarityReportOptions(),
 ) -> SimilarityReport:
     maybe_build(target, options.build)
 
-    comparer = FunctionComparer(
-        target,
-        canonical_aliases=options.canonical_aliases,
-        signature_overloads=options.signature_overloads,
-    )
-    original_image = PEImage(target.original_exe)
-    max_bytes, padding_mnemonics = load_disassembly_policy(target)
+    builder = _ReportBuilder(target, options)
     groups_by_source = load_source_groups(target.source_dirs, target.map_skip, target.source_excludes)
-
-    original_starts = function_starts_from_export_dir(target.code_dir) if options.compare_bytes else []
-    rebuilt_starts = function_starts_from_map(comparer.map_entries()) if options.compare_bytes else []
-
-    def next_start(starts: list[int], address: int) -> int | None:
-        index = bisect_right(starts, address)
-        return starts[index] if index < len(starts) else None
-
-    def byte_comparison(comparison) -> ByteComparison | None:
-        if not options.compare_bytes or not comparison.original.instructions or not comparison.rebuilt.instructions:
-            return None
-        original_last = max(instr.address for instr in comparison.original.instructions)
-        rebuilt_last = max(instr.address for instr in comparison.rebuilt.instructions)
-        return compare_function_bytes(
-            original_image,
-            comparison.original.instructions,
-            comparer.pe_image(target.rebuilt_exe),
-            comparison.rebuilt.instructions,
-            original_end=next_start(original_starts, original_last),
-            rebuilt_end=next_start(rebuilt_starts, rebuilt_last),
-        )
-
-    rows: list[SimilarityReportRow] = []
-    compared = 0
-    similarity_sum = 0.0
-    at_100 = 0
-    above_90 = 0
-    below_90 = 0
-    errors = 0
-    asm_fallbacks = 0
-    missing_asm = 0
-
     for source_path in sorted(groups_by_source):
-        source_file = os.path.basename(source_path)
-        if options.file_filter and options.file_filter not in source_file and options.file_filter not in source_path:
-            matching_groups = [
-                group for group in groups_by_source[source_path]
-                if options.file_filter in group.name
-            ]
-        else:
-            matching_groups = groups_by_source[source_path]
-        if not matching_groups:
-            continue
         occurrences: dict[str, int] = {}
-        for group in matching_groups:
+        for group in _groups_matching_filter(source_path, groups_by_source[source_path], options.file_filter):
             occurrence_index = occurrences.get(group.name, 0)
             occurrences[group.name] = occurrence_index + 1
-
-            # MSVC SEH functions are exported by Ghidra as several contiguous
-            # chunks (a short FS-frame prologue + the body), each carrying its own
-            # "Function start:" annotation, so a single source function ends up with
-            # multiple original addresses. The rebuilt binary has ONE function, so
-            # compare it once against the concatenated chunks instead of measuring
-            # each chunk separately (which makes the prologue chunk a spurious ~5%
-            # row that also drags the average down).
-            if len(group.addresses) > 1:
-                chunk_paths: list[str] = []
-                missing_chunks = False
-                for address_text in group.addresses:
-                    address = int(address_text, 16)
-                    path = resolve_export(target.code_dir, address)
-                    if path is None or not os.path.exists(path):
-                        missing_chunks = True
-                        break
-                    chunk_paths.append(path)
-
-                if not missing_chunks and chunk_paths:
-                    # A multi-address group is either one SEH function split into
-                    # contiguous chunks (short FS prologue + body) or N duplicate
-                    # instances of the same function (e.g. identical non-COMDAT
-                    # methods emitted once per class/TU). Chunks of an SEH split
-                    # look nothing alike, while duplicate instances share the
-                    # same mnemonic stream — so pairwise-compare the original
-                    # pieces to tell them apart.
-                    chunk_mnemonics: list[list[str]] = []
-                    for address_text, path in zip(group.addresses, chunk_paths):
-                        try:
-                            piece = disassemble_exported_function(
-                                original_image,
-                                path,
-                                int(address_text, 16),
-                                max_bytes,
-                                padding_mnemonics,
-                            )
-                        except (FileNotFoundError, RuntimeError, ValueError):
-                            chunk_mnemonics = []
-                            break
-                        chunk_mnemonics.append(instruction_mnemonics(piece.instructions))
-                    duplicate_instances = (
-                        len(chunk_mnemonics) == len(chunk_paths)
-                        and all(len(mnems) >= 8 for mnems in chunk_mnemonics)
-                        and all(
-                            mnemonic_similarity(chunk_mnemonics[0], mnems) >= 80.0
-                            for mnems in chunk_mnemonics[1:]
-                        )
-                    )
-
-                    if duplicate_instances:
-                        for address_text, path in zip(group.addresses, chunk_paths):
-                            address = int(address_text, 16)
-                            try:
-                                comparison = comparer.compare(group.name, path, build=False)
-                            except (FunctionCompareError, FileNotFoundError, RuntimeError, ValueError):
-                                errors += 1
-                                rows.append(SimilarityReportRow(source_file, group.name, address, None, "NOT FOUND"))
-                                continue
-                            similarity = comparison.similarity
-                            compared += 1
-                            similarity_sum += similarity
-                            if similarity >= 99.99:
-                                at_100 += 1
-                            if similarity >= 90.0:
-                                above_90 += 1
-                            else:
-                                below_90 += 1
-                            rows.append(SimilarityReportRow(
-                                source_file,
-                                group.name,
-                                address,
-                                similarity,
-                                f"{similarity:.2f}%",
-                                byte_comparison(comparison),
-                            ))
-                        continue
-
-                    entry_address = min(int(a, 16) for a in group.addresses)
-                    try:
-                        comparison = comparer.compare_combined(group.name, chunk_paths, build=False)
-                    except (FunctionCompareError, FileNotFoundError, RuntimeError, ValueError):
-                        errors += 1
-                        rows.append(SimilarityReportRow(source_file, group.name, entry_address, None, "NOT FOUND"))
-                    else:
-                        similarity = comparison.similarity
-                        compared += 1
-                        similarity_sum += similarity
-                        if similarity >= 99.99:
-                            at_100 += 1
-                        if similarity >= 90.0:
-                            above_90 += 1
-                        else:
-                            below_90 += 1
-                        rows.append(SimilarityReportRow(
-                            source_file,
-                            group.name,
-                            entry_address,
-                            similarity,
-                            f"{similarity:.2f}%",
-                            byte_comparison(comparison),
-                        ))
-                    continue
-                # fall through to per-chunk handling if a chunk's disasm is missing
-
-            for address_text in group.addresses:
-                address = int(address_text, 16)
-                path = resolve_export(target.code_dir, address)
-                if path is None or not os.path.exists(path):
-                    missing_asm += 1
-                    rows.append(SimilarityReportRow(source_file, group.name, address, None, "MISSING ASM"))
-                    continue
-
-                comparison = None
-                try:
-                    comparison = comparer.compare(group.name, path, build=False)
-                except (FunctionCompareError, FileNotFoundError, RuntimeError, ValueError):
-                    similarity = compare_asm_fallback(
-                        target,
-                        original_image,
-                        source_path,
-                        group.name,
-                        occurrence_index,
-                        address,
-                        path,
-                        max_bytes,
-                        padding_mnemonics,
-                    )
-                    if similarity is None:
-                        errors += 1
-                        rows.append(SimilarityReportRow(source_file, group.name, address, None, "NOT FOUND"))
-                        continue
-                    asm_fallbacks += 1
-                else:
-                    similarity = comparison.similarity
-
-                compared += 1
-                similarity_sum += similarity
-                if similarity >= 99.99:
-                    at_100 += 1
-                if similarity >= 90.0:
-                    above_90 += 1
-                else:
-                    below_90 += 1
-                rows.append(SimilarityReportRow(
-                    source_file,
-                    group.name,
-                    address,
-                    similarity,
-                    f"{similarity:.2f}%",
-                    byte_comparison(comparison) if comparison is not None else None,
-                ))
-
-    return SimilarityReport(
-        rows=tuple(rows),
-        compared=compared,
-        similarity_sum=similarity_sum,
-        at_100=at_100,
-        above_90=above_90,
-        below_90=below_90,
-        errors=errors,
-        missing_asm=missing_asm,
-        asm_fallbacks=asm_fallbacks,
-    )
+            builder.compare_group(source_path, group, occurrence_index)
+    return builder.tally.report()
 
 
 def load_similarity_reasons(path: str) -> dict[int, str]:
@@ -435,7 +465,7 @@ def format_similarity_report(
     if reasons is not None:
         lines.extend(["", "--- Recorded reasons for similarity below 90% ---"])
         below = sorted(
-            (row for row in report.rows if row.similarity is not None and row.similarity < 90.0),
+            (row for row in report.rows if row.similarity is not None and row.similarity < HIGH_SIMILARITY),
             key=lambda row: (row.similarity, row.address, row.function_name),
         )
         for row in below:

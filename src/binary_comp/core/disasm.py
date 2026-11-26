@@ -335,6 +335,41 @@ def trim_trailing_data(instructions: list[Instruction]) -> list[Instruction]:
     return instructions
 
 
+def is_indexed_jump_table_operand(operand: Operand) -> bool:
+    """``[table + reg*4]``: the operand of a ``jmp`` through a switch table."""
+    return operand.kind == "mem" and not operand.base and bool(operand.index) and operand.scale == 4
+
+
+def read_jump_table(
+    image: PEImage,
+    table: int,
+    target_start: int,
+    target_end: int,
+    *,
+    table_end: int | None = None,
+    max_entries: int | None = 4096,
+) -> list[int]:
+    """Read 4-byte switch-table entries until one leaves [target_start, target_end).
+
+    Reading also stops at ``table_end`` and after ``max_entries`` entries,
+    when given, or at the first unreadable entry.
+    """
+    targets: list[int] = []
+    cursor = table
+    while max_entries is None or len(targets) < max_entries:
+        if table_end is not None and cursor + 4 > table_end:
+            break
+        raw = image.read(cursor, 4)
+        if raw is None or len(raw) != 4:
+            break
+        target = int.from_bytes(raw, "little")
+        if not (target_start <= target < target_end):
+            break
+        targets.append(target)
+        cursor += 4
+    return targets
+
+
 def disassemble_reachable_x86(
     image: PEImage,
     start: int,
@@ -375,9 +410,7 @@ def disassemble_reachable_x86(
     ) -> bool:
         if operand.kind != "mem":
             return False
-        indexed_scale = (
-            not operand.base and bool(operand.index) and operand.scale == 4
-        )
+        indexed_scale = is_indexed_jump_table_operand(operand)
         shifted_base = (
             bool(operand.base)
             and not operand.index
@@ -386,18 +419,10 @@ def disassemble_reachable_x86(
         )
         if not indexed_scale and not shifted_base:
             return False
-        table = unsigned32(operand.disp)
-        found = False
-        for index in range(4096):
-            raw = image.read(table + index * 4, 4)
-            if raw is None or len(raw) != 4:
-                break
-            target = struct.unpack("<I", raw)[0]
-            if not (start <= target < end):
-                break
+        targets = read_jump_table(image, unsigned32(operand.disp), start, end)
+        for target in targets:
             enqueue(target)
-            found = True
-        return found
+        return bool(targets)
 
     while pending:
         cursor = pending.pop()
@@ -480,7 +505,7 @@ def switch_jump_table_ranges(
         operand = instr.operands[0]
         if operand.kind != "mem":
             continue
-        indexed_by_four = not operand.base and bool(operand.index) and operand.scale == 4
+        indexed_by_four = is_indexed_jump_table_operand(operand)
         shifted_base = False
         if operand.base and not operand.index and operand.scale == 1:
             base = full_register_name(operand.base)
