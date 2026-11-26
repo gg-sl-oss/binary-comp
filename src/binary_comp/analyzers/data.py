@@ -10,7 +10,17 @@ from binary_comp.core.mapfile import parse_encoded_address_map
 from binary_comp.core.pe import EXECUTABLE_FLAG, READABLE_FLAG, PEImage
 from binary_comp.core.image import load_image
 from binary_comp.core.le import LEImage
-from binary_comp.source.globals import GlobalDecl, parse_globals_source
+from binary_comp.analyzers.globals import (
+    GlobalDecl,
+    GlobalTypes,
+    base_type_size,
+    eval_int_expr,
+    globals_types,
+    infer_size,
+    parse_globals_source,
+    rebuilt_symbol_indexes,
+    rebuilt_va_for_decl,
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +95,58 @@ def format_bytes(data: bytes | None, max_bytes: int = 32) -> str:
         return " ".join(f"{byte:02x}" for byte in data)
     prefix = " ".join(f"{byte:02x}" for byte in data[:max_bytes])
     return f"{prefix} ... ({len(data)} bytes)"
+
+
+MAX_GLOBAL_SIZE = 0x10000
+DEFAULT_UNKNOWN_ELEMENT_SIZE = 4
+
+
+def load_data_globals(
+    globals_path: str,
+    extra_type_sizes: dict[str, int] | None = None,
+    constants: dict[str, int] | None = None,
+    unknown_element_size: int | None = DEFAULT_UNKNOWN_ELEMENT_SIZE,
+) -> list[GlobalDecl]:
+    """The addressed globals in ``globals_path`` with their sizes, by address.
+
+    A size comes from the declared type and dimensions, with ``constants``
+    resolving named dimensions. An element type of unknown size counts as
+    ``unknown_element_size`` bytes (pointer-sized by default, which is right
+    for the many pointer typedefs). With None it is an error instead, so the
+    project has to configure ``globals.type_sizes``.
+    """
+    types = globals_types({"type_sizes": extra_type_sizes or {}})
+    constants = {"NULL": 0, **(constants or {})}
+    decls = sorted(parse_globals_source(globals_path), key=lambda decl: decl.address)
+    for decl in decls:
+        size = infer_size(decl, constants, None, types=types)
+        if size is None and unknown_element_size is not None:
+            size = _lenient_size(decl, constants, types, unknown_element_size)
+        if size is None or size <= 0 or size > MAX_GLOBAL_SIZE:
+            raise ValueError(f"unknown size of global {decl.name}; configure globals.type_sizes")
+        decl.size = size
+    return decls
+
+
+def _lenient_size(decl: GlobalDecl, constants: dict[str, int], types: GlobalTypes, unknown_element_size: int) -> int:
+    """Element size times the dimensions that evaluate; a dimension that
+    does not (``[]`` without a string, an unknown macro) counts as one."""
+    size = base_type_size(decl.type_text, types=types) or unknown_element_size
+    for dim in decl.dims:
+        try:
+            size *= eval_int_expr(dim, constants)
+        except ValueError:
+            continue
+    return size
+
+
+def describe_initializer(decl: GlobalDecl) -> str:
+    if not decl.has_initializer or decl.initializer is None:
+        return "uninitialized"
+    text = decl.initializer.strip()
+    if len(text) > 30:
+        text = text[:30] + "..."
+    return f"init: {text}"
 
 
 def format_value(data: bytes | None) -> str:
@@ -246,43 +308,30 @@ def compare_global_data(
     globals_path: str,
     extra_type_sizes: dict[str, int] | None = None,
     relocated_address_map: dict[int, int] | None = None,
+    constants: dict[str, int] | None = None,
 ) -> DataCompareSummary:
     original = load_image(original_path, relocate=True)
     rebuilt = load_image(rebuilt_path, relocate=True)
     address_map = parse_encoded_address_map(map_path)
-    if isinstance(original, LEImage) or os.path.isdir(globals_path):
-        from binary_comp.analyzers.globals import (
-            configure_globals, infer_size, parse_globals_source as parse_declarations,
-            rebuilt_symbol_indexes, rebuilt_va_for_decl,
-        )
-        configure_globals({"type_sizes": extra_type_sizes or {}})
-        declarations = parse_declarations(globals_path)
-        globals_list = []
-        for decl in declarations:
-            size = infer_size(decl, {"NULL": 0}, None)
-            if size is None or size <= 0:
-                raise ValueError(f"unknown size of global {decl.name}; configure globals.type_sizes")
-            globals_list.append(GlobalDecl(decl.address, size, decl.name, decl.type_text,
-                                           "initialized" if decl.has_initializer else "implicit zero"))
-        exact, by_address = rebuilt_symbol_indexes(
-            map_path, declarations, rebuilt.segment_bases() if isinstance(rebuilt, LEImage) else None)
-        for decl in declarations:
+    # LE images and directories of globals have always required every type
+    # size to be known.
+    strict_sizes = isinstance(original, LEImage) or os.path.isdir(globals_path)
+    globals_list = load_data_globals(
+        globals_path,
+        extra_type_sizes,
+        constants,
+        unknown_element_size=None if strict_sizes else DEFAULT_UNKNOWN_ELEMENT_SIZE,
+    )
+    exact, by_address = rebuilt_symbol_indexes(
+        map_path, globals_list, rebuilt.segment_bases() if isinstance(rebuilt, LEImage) else None)
+    # A global whose name does not encode its address is found under its own
+    # name in the map. For LE images and directories of globals the name
+    # lookup has always taken precedence over the encoded address.
+    for decl in globals_list:
+        if strict_sizes or decl.address not in address_map:
             va = rebuilt_va_for_decl(decl, exact, by_address)
             if va is not None:
                 address_map[decl.address] = va
-        globals_list.sort(key=lambda decl: decl.address)
-    else:
-        from binary_comp.analyzers.globals import rebuilt_symbol_indexes, rebuilt_va_for_decl
-
-        globals_list = parse_globals_source(globals_path, extra_type_sizes)
-        # A global whose name does not encode its address is found under its
-        # own name in the map, as for LE images.
-        exact, by_address = rebuilt_symbol_indexes(map_path, globals_list)
-        for decl in globals_list:
-            if decl.address not in address_map:
-                va = rebuilt_va_for_decl(decl, exact, by_address)
-                if va is not None:
-                    address_map[decl.address] = va
     if not globals_list:
         raise ValueError(f"no addressed global definitions found in {globals_path}")
     inferred_address_map = infer_unmapped_data_addresses(
@@ -441,13 +490,14 @@ def find_missing_globals(
     max_address: int | None = None,
     skip_ranges: tuple[tuple[int, int], ...] = (),
     extra_type_sizes: dict[str, int] | None = None,
+    constants: dict[str, int] | None = None,
 ) -> MissingGlobalsSummary:
     original = PEImage(original_path)
     section = original.section_named(section_name)
     if section is None:
         raise ValueError(f"section not found: {section_name}")
 
-    globals_list = parse_globals_source(globals_path, extra_type_sizes)
+    globals_list = load_data_globals(globals_path, extra_type_sizes, constants)
     covered_ranges = [
         (global_decl.address, global_decl.address + global_decl.size)
         for global_decl in globals_list
@@ -504,7 +554,7 @@ def format_comparison(summary: DataCompareSummary, verbose: bool = False) -> str
         rebuilt = f"0x{comparison.rebuilt_address:08x}" if comparison.rebuilt_address is not None else "(not mapped)"
         lines.append(
             f"0x{global_decl.address:08x}   {rebuilt:<14} "
-            f"{global_decl.name:<28} {comparison.status:<10} {global_decl.description}"
+            f"{global_decl.name:<28} {comparison.status:<10} {describe_initializer(global_decl)}"
         )
 
         if verbose or comparison.status == "MISMATCH":

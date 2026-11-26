@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 from bisect import bisect_right
 from dataclasses import dataclass, field
+from typing import Mapping
 
 
 @dataclass(frozen=True)
@@ -332,6 +333,21 @@ def evaluate_condition(expression: str, state: dict[str, object], depth: int = 0
         return value
     except _Unparsable:
         return None
+
+
+def evaluate_constant(expression: str, constants: Mapping[str, int]) -> int:
+    """Evaluate a C integer constant expression with C semantics.
+
+    Division truncates toward zero, ``010`` is octal, and character
+    literals, ``%``, ``^``, ``~``, comparisons and ``?:`` are understood.
+    Names resolve through ``constants``. Raises ValueError when the
+    expression uses anything else or does not evaluate (division by zero).
+    """
+    state: dict[str, object] = {name: str(value) for name, value in constants.items()}
+    value = evaluate_condition(expression, state)
+    if value is None:
+        raise ValueError(f"not a constant expression: {expression!r}")
+    return value
 
 
 def _tokenize(expression: str) -> list[tuple[str, str]]:

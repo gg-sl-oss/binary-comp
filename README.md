@@ -214,6 +214,12 @@ and without a declaration every source is parsed exactly as written. MSVC
 `__asm` blocks and statements are always blanked before parsing, so functions
 written in inline assembly stay in the inventory.
 
+`globals` and `data` evaluate array dimensions, `#define` values and integer
+initializers with the same C evaluator as `#if`: division truncates toward
+zero, a leading `0` means octal, and character literals, `%`, `^`, `~`,
+comparisons and `?:` are understood. An expression that names an unknown
+macro, calls a function or uses `sizeof` does not evaluate.
+
 ### Source Function Annotations
 
 Place a `Function start` comment immediately before the rebuilt source function
@@ -311,7 +317,7 @@ original addresses for external function-pointer initializers. The `data`
 | `report` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs`, `code_export_dir` | Uses one export per annotated original address. Generate them with `export-asm` or Ghidra. |
 | `order` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | Ranks compilation-unit order and boundary hints. `code_export_dir` adds call, data-reference, helper-size, and frame-mode evidence. |
 | `values` | `original_exe`, `rebuilt_exe`, `map`, `source_dirs` | `code_export_dir` improves original function boundaries. Capstone is required. |
-| `data` | `original_exe`, `rebuilt_exe`, `map`, `globals_source` | Compares globals with encoded or commented original addresses. |
+| `data` | `original_exe`, `rebuilt_exe`, `map`, `globals_source` | Compares globals with encoded or commented original addresses. Reads declarations with the same C++ parser as `globals` (needs `binary-comp[cpp]`); named array dimensions use the `#define`s in `globals_header` and `define_headers`. A PE global whose type has no known size is compared as 4 bytes per element; set `globals.type_sizes` to compare it whole. |
 | `globals` | `original_exe`, `globals_source` | Optional headers and `auto_complete` broaden coverage. `--check-rebuilt-layout` also needs the rebuilt MAP/assembly for relocation-sensitive access checks. |
 | `calls` | `source_dirs`, `code_export_dir`, `asm_dir` | Compares call target multisets from original exports and rebuilt assembly listings. |
 | `global-access` | `source_dirs`, `code_export_dir`, `asm_dir` | Compares read/write multisets for global data references. |

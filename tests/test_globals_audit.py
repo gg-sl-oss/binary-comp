@@ -5,7 +5,7 @@ import struct
 import pytest
 
 from binary_comp.analyzers.globals import (
-    GlobalDecl, GlobalsAuditOptions, audit_globals, configure_globals, format_report,
+    GlobalDecl, GlobalsAuditOptions, audit_globals, format_report, globals_types,
     numeric_array_bytes, strip_comments, symbolic_struct_array_bytes,
 )
 from binary_comp.config import ProjectTarget
@@ -415,22 +415,37 @@ def test_globals_audit_reports_rebuilt_asm_access_spanning_source_global(tmp_pat
 
 
 def test_symbolic_struct_array_packs_byte_fields():
-    configure_globals({"symbolic_struct_arrays": {"Entry": {"fields": [
+    types = globals_types({"symbolic_struct_arrays": {"Entry": {"fields": [
         {"kind": "uint8"}, {"kind": "uint16"}, {"kind": "uint8"},
     ]}}})
-    try:
-        decl = GlobalDecl(
-            address=0x1000, name="entries", statement="", line=1, type_text="Entry",
-            dims=["2"], has_initializer=True,
-            initializer="{{1, 0x203, 0x1ff}, {(unsigned char)4, 5, 6}}",
-        )
+    decl = GlobalDecl(
+        address=0x1000, name="entries", statement="", line=1, type_text="Entry",
+        dims=["2"], has_initializer=True,
+        initializer="{{1, 0x203, 0x1ff}, {(unsigned char)4, 5, 6}}",
+    )
 
-        data, note = symbolic_struct_array_bytes(decl, {}, {}, {})
-    finally:
-        configure_globals({})
+    data, note = symbolic_struct_array_bytes(decl, {}, {}, {}, types=types)
 
     assert note == ""
     assert data == bytes([1, 0x03, 0x02, 0xFF, 4, 5, 0, 6])
+
+
+def test_eval_int_expr_uses_c_semantics():
+    from binary_comp.analyzers.globals import eval_int_expr
+
+    assert eval_int_expr("-7 / 2", {}) == -3  # truncates toward zero
+    assert eval_int_expr("-7 % 2", {}) == -1
+    assert eval_int_expr("010", {}) == 8  # octal
+    assert eval_int_expr("'A' + 1", {}) == 66
+    assert eval_int_expr("0x10u << 2", {}) == 64
+    assert eval_int_expr("(COUNT > 4 ? COUNT : 4) ^ 1", {"COUNT": 6}) == 7
+    assert eval_int_expr("5 * 25 * 15", {}) == 1875
+    with pytest.raises(ValueError):
+        eval_int_expr("UNKNOWN_NAME + 1", {})
+    with pytest.raises(ValueError):
+        eval_int_expr("1 / 0", {})
+    with pytest.raises(ValueError):
+        eval_int_expr("sizeof(int)", {})
 
 
 def test_strip_comments_keeps_comment_markers_inside_literals():
@@ -452,4 +467,4 @@ def test_string_array_with_a_url_initializer_is_encoded():
         initializer='"http://x"',
     )
     # strip_comments used to cut the string at "//" and parsing then raised.
-    assert numeric_array_bytes(decl, {}) == (b"http://x\0", "")
+    assert numeric_array_bytes(decl, {}, types=globals_types({})) == (b"http://x\0", "")
