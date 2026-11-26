@@ -311,6 +311,33 @@ _TEXT ENDS
     ]
 
 
+def test_extract_compiled_global_accesses_leaves_out_eh_unwind_funclets(tmp_path):
+    asm = tmp_path / "sample.asm"
+    asm.write_text(
+        """
+_TEXT SEGMENT
+?Run@@YAXXZ PROC NEAR ; Run
+    mov eax, DWORD PTR ?g_Source_00402010@@3HA ; g_Source_00402010
+_TEXT ENDS
+text$x SEGMENT
+__unwindfunclet$?Run@@YAXXZ$0:
+    mov DWORD PTR ?g_Target_00402018@@3HA, eax ; g_Target_00402018
+text$x ENDS
+?Run@@YAXXZ ENDP
+""",
+        encoding="utf-8",
+    )
+
+    # The funclet's write used to be counted as part of Run.
+    assert extract_compiled_global_accesses(
+        str(asm),
+        "Run",
+        0,
+        frozenset({"g_Source_00402010", "g_Target_00402018"}),
+        frozenset(),
+    ) == ["READ:g_Source_00402010"]
+
+
 def test_check_global_accesses_reads_every_chunk_of_a_split_function(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

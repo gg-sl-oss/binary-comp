@@ -12,7 +12,9 @@ from typing import Any
 
 from binary_comp.build import maybe_build
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
+from binary_comp.core.asm_listing import function_lines
 from binary_comp.core.disasm import Instruction, disassemble_reachable_x86, unsigned32
+from binary_comp.core.ghidra import find_export, iter_exports, read_export_header
 from binary_comp.core.mapfile import parse_msvc_map_symbols
 from binary_comp.core.pe import PEImage
 from binary_comp.core.symbols import normalize_compiled
@@ -307,41 +309,10 @@ def compiled_instruction_fingerprint(
     Operand values remain in the fingerprint; only source-local stack names and
     generated jump-label numbers are normalized.
     """
-    try:
-        with open(asm_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except OSError:
-        return ()
-
     body: list[str] = []
-    current_index = -1
-    in_function = False
-    for line in lines:
-        stripped = line.strip()
-        if not in_function:
-            if "PROC" not in stripped:
-                continue
-            matched = False
-            if "; " in stripped:
-                comment = stripped.split("; ", 1)[1].strip()
-                if comment.endswith(", COMDAT"):
-                    comment = comment[:-len(", COMDAT")].strip()
-                matched = comment == function_name
-            if not matched:
-                symbol = stripped.split(None, 1)[0]
-                matched = normalize_compiled(symbol, signature_names) == function_name
-            if not matched:
-                continue
-            current_index += 1
-            if current_index != occurrence_index:
-                continue
-            in_function = True
-            continue
-
-        if re.match(r"\S+\s+ENDS\b", stripped, re.IGNORECASE):
-            break
-        if re.search(r"\bENDP\b", stripped):
-            break
+    for stripped in function_lines(
+        asm_path, function_name, occurrence_index, signature_names=signature_names
+    ):
         code = stripped.split(";", 1)[0].strip()
         if not code or code.endswith(":"):
             continue
@@ -554,20 +525,8 @@ def auto_detect_crt(code_dir: str) -> dict[int, str]:
 
 def auto_detect_named_functions(code_dir: str) -> dict[int, str]:
     named_functions = dict(auto_detect_crt(code_dir))
-    for disassembled in glob.glob(os.path.join(code_dir, "FUN_*.disassembled.txt")):
-        match = re.match(r"FUN_([0-9a-fA-F]+)\.disassembled\.txt", os.path.basename(disassembled))
-        if not match:
-            continue
-        addr = int(match.group(1), 16)
-        try:
-            with open(disassembled, "r", encoding="utf-8", errors="ignore") as f:
-                header = f.readline()
-        except OSError:
-            continue
-        name_match = re.match(r"Function:\s*(.+?)\s*$", header)
-        if not name_match:
-            continue
-        name = name_match.group(1).strip()
+    for addr, disassembled in iter_exports(code_dir):
+        name = read_export_header(disassembled).name
         if not name or name.startswith("FUN_"):
             continue
         named_functions.setdefault(addr, name)
@@ -925,47 +884,11 @@ def extract_calls_from_compiled(
     signature_names: frozenset[str] = frozenset(),
 ) -> list[str]:
     calls = []
-    try:
-        with open(asm_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except OSError:
-        return calls
-
-    func_lines = []
-    current_index = -1
-    in_func = False
-    for line in lines:
-        stripped = line.strip()
-        if not in_func:
-            if "PROC" not in stripped:
-                continue
-            matched = False
-            if "; " in stripped:
-                comment = stripped.split("; ", 1)[1].strip()
-                if comment.endswith(", COMDAT"):
-                    comment = comment[:-len(", COMDAT")].strip()
-                matched = comment == function_name
-            if not matched:
-                symbol = stripped.split(None, 1)[0]
-                matched = normalize_compiled(symbol, signature_names) == function_name
-            if not matched:
-                continue
-            current_index += 1
-            if current_index != occurrence_index:
-                continue
-            in_func = True
-            continue
-
-        if re.match(r"\S+\s+ENDS\b", stripped, re.IGNORECASE):
-            # With synchronous C++ exception handling MSVC emits the normal
-            # function in _TEXT, closes that segment, then emits unwind
-            # funclets in text$x before writing the final ENDP.  Those funclet
-            # calls are metadata-driven cleanup paths rather than call sites in
-            # the function body being compared.
-            break
-        if re.search(r"\bENDP\b", stripped):
-            break
-        func_lines.append(stripped)
+    # Stops at ENDS, so EH unwind funclets in text$x are left out; see
+    # core/asm_listing.py.
+    func_lines = function_lines(
+        asm_path, function_name, occurrence_index, signature_names=signature_names
+    )
 
     if not func_lines:
         return calls
@@ -1078,21 +1001,6 @@ def has_disassembly_body(disasm_path: str) -> bool:
     return body_lines[-1].upper().startswith(("JMP", "CALL"))
 
 
-def find_disasm_path(code_dir: str, addr: int) -> str | None:
-    addr_hex = f"{addr:X}"
-    candidates = [
-        f"FUN_{addr_hex}.disassembled.txt",
-        f"FUN_{addr_hex.lower()}.disassembled.txt",
-        f"FUN_00{addr_hex}.disassembled.txt",
-        f"FUN_00{addr_hex.lower()}.disassembled.txt",
-    ]
-    for candidate in candidates:
-        path = os.path.join(code_dir, candidate)
-        if os.path.exists(path):
-            return path
-    return None
-
-
 def select_functions(
     target: ProjectTarget,
     options: CallsOptions,
@@ -1117,7 +1025,7 @@ def select_functions(
             addr = addrs[-1]
             paths = []
             for chunk in addrs:
-                chunk_path = find_disasm_path(target.code_dir, chunk)
+                chunk_path = find_export(target.code_dir, chunk)
                 if chunk_path is not None and has_disassembly_body(chunk_path):
                     paths.append(chunk_path)
             if not paths:
