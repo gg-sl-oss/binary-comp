@@ -17,11 +17,13 @@ except ImportError:
     X86_OP_IMM = X86_OP_MEM = X86_OP_REG = None
 
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
+from binary_comp.core.ghidra import iter_exports
 from binary_comp.core.mapfile import parse_encoded_address_symbols, parse_msvc_map_symbols, parse_watcom_map_symbols
 from binary_comp.core.image import load_image
 from binary_comp.core.le import LEImage
 from binary_comp.core.pe import PEImage
 from binary_comp.source.cpp import make_cpp_parser, node_text, parse_source_functions, sanitize_source, walk
+from binary_comp.source.functions import iter_source_files
 
 
 BASE_TYPE_SIZES = {
@@ -233,10 +235,19 @@ def parse_int_value_map(values: dict[str, Any]) -> dict[int, int]:
     }
 
 
+# String and character literals are matched first so that "//" or "/*"
+# inside them (``"http://x"``) is not taken for a comment.
+_LITERAL_OR_COMMENT_RE = re.compile(
+    r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|/\*.*?\*/|//[^\n]*',
+    re.S,
+)
+
+
 def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    text = re.sub(r"//.*", "", text)
-    return text
+    return _LITERAL_OR_COMMENT_RE.sub(
+        lambda match: "" if match.group(0).startswith("/") else match.group(0),
+        text,
+    )
 
 
 def address_from_encoded_suffix(name: str) -> Optional[int]:
@@ -476,11 +487,8 @@ def parse_globals_file(path: str,
     if os.path.isdir(path):
         suffixes = (".h", ".hh", ".hpp", ".hxx") if require_extern else (".c", ".cc", ".cpp", ".cxx")
         result: List[GlobalDecl] = []
-        for root, dirs, files in os.walk(path):
-            dirs.sort()
-            for name in sorted(files):
-                if name.lower().endswith(suffixes):
-                    result.extend(parse_globals_file(os.path.join(root, name), require_extern, address_warnings))
+        for file_path in iter_source_files([path], suffixes, ignore_case=True):
+            result.extend(parse_globals_file(file_path, require_extern, address_warnings))
         return result
     with open(path, "rb") as f:
         source = f.read()
@@ -571,15 +579,9 @@ def parse_code_globals(path: str) -> List[CodeGlobal]:
 
 def parse_function_symbols(src_dir: str) -> Dict[str, int]:
     symbols: Dict[str, int] = {}
-    if not src_dir or not os.path.isdir(src_dir):
-        return symbols
-    for root, _, files in os.walk(src_dir):
-        for filename in files:
-            if not filename.endswith((".c", ".C", ".cpp")):
-                continue
-            path = os.path.join(root, filename)
-            for function in parse_source_functions(path):
-                symbols[function.name] = int(function.address, 16)
+    for path in iter_source_files([src_dir], (".c", ".C", ".cpp")):
+        for function in parse_source_functions(path):
+            symbols[function.name] = int(function.address, 16)
     return symbols
 
 
@@ -1653,21 +1655,11 @@ DISASM_REGISTER_SIZES = {
 def iter_source_scan_files(source_dirs: Sequence[str],
                            source_excludes: Sequence[str]) -> Iterable[str]:
     suffixes = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
-    excludes = tuple(source_excludes)
-    for source_dir in source_dirs:
-        if not source_dir or not os.path.isdir(source_dir):
-            continue
-        for root, dirs, files in os.walk(source_dir):
-            if excludes and any(exclude and exclude in root for exclude in excludes):
-                dirs[:] = []
-                continue
-            for filename in files:
-                if not filename.endswith(suffixes):
-                    continue
-                path = os.path.join(root, filename)
-                if excludes and any(exclude and exclude in path for exclude in excludes):
-                    continue
-                yield path
+    yield from iter_source_files(
+        source_dirs,
+        suffixes,
+        source_excludes=[exclude for exclude in source_excludes if exclude],
+    )
 
 
 def mask_comments_for_layout_scan(text: str) -> str:
@@ -2206,10 +2198,7 @@ def find_original_direct_global_span_issues(decls: Sequence[GlobalDecl],
     issues: List[Issue] = []
     seen: Set[Tuple[str, int, int]] = set()
 
-    for filename in sorted(os.listdir(code_dir)):
-        if not filename.endswith(".disassembled.txt"):
-            continue
-        path = os.path.join(code_dir, filename)
+    for _, path in iter_exports(code_dir):
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
@@ -2284,10 +2273,7 @@ def find_original_indexed_global_issues(decls: Sequence[GlobalDecl],
     issues: List[Issue] = []
     seen: Set[Tuple[str, int]] = set()
 
-    for filename in sorted(os.listdir(code_dir)):
-        if not filename.endswith(".disassembled.txt"):
-            continue
-        path = os.path.join(code_dir, filename)
+    for _, path in iter_exports(code_dir):
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()

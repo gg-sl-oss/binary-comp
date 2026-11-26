@@ -11,7 +11,6 @@ from typing import Any, Iterable, Sequence
 from binary_comp.analyzers.calls import (
     CallsOptions,
     load_calls_policy,
-    normalize_compiled,
     policy_with_same_address_aliases,
     select_functions,
 )
@@ -26,6 +25,7 @@ from binary_comp.analyzers.globals import (
     symbol_for_auto_global,
 )
 from binary_comp.build import maybe_build
+from binary_comp.core.asm_listing import function_lines
 from binary_comp.config import ConfigError, ProjectTarget
 from binary_comp.core.pe import PEImage
 
@@ -538,41 +538,9 @@ def asm_function_lines(
     occurrence_index: int,
     signature_names: frozenset[str],
 ) -> list[str]:
-    try:
-        with open(asm_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except OSError:
-        return []
-
-    func_lines: list[str] = []
-    current_index = -1
-    in_func = False
-    for line in lines:
-        stripped = line.strip()
-        if not in_func:
-            if "PROC" not in stripped:
-                continue
-            matched = False
-            if "; " in stripped:
-                comment = stripped.split("; ", 1)[1].strip()
-                if comment.endswith(", COMDAT"):
-                    comment = comment[:-len(", COMDAT")].strip()
-                matched = comment == function_name
-            if not matched:
-                symbol = stripped.split(None, 1)[0]
-                matched = normalize_compiled(symbol, signature_names) == function_name
-            if not matched:
-                continue
-            current_index += 1
-            if current_index != occurrence_index:
-                continue
-            in_func = True
-            continue
-
-        if re.search(r"\bENDP\b", stripped):
-            break
-        func_lines.append(stripped)
-    return func_lines
+    # Stops at ENDS like calls does: EH unwind funclets emitted in text$x
+    # before ENDP are not part of the function body.
+    return function_lines(asm_path, function_name, occurrence_index, signature_names=signature_names)
 
 
 def extract_compiled_global_accesses(
@@ -697,9 +665,13 @@ def check_global_accesses(
     for function in functions:
         if not os.path.exists(function.asm_path):
             continue
+        # A function split across several original addresses reads globals
+        # from every chunk, so take the union (as calls does).
         original = [
-            token for token in extract_original_global_accesses(
-                function.disasm_path,
+            token
+            for chunk_path in (function.disasm_paths or (function.disasm_path,))
+            for token in extract_original_global_accesses(
+                chunk_path,
                 global_ranges,
                 data_ranges,
                 include_address_immediates=options.include_address_immediates,

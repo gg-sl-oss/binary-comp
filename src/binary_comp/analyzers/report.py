@@ -20,8 +20,9 @@ from binary_comp.analyzers.byte_compare import ByteComparison, compare_function_
 from binary_comp.analyzers.calls import asm_path_for_source as calls_asm_path_for_source
 from binary_comp.build import maybe_build
 from binary_comp.config import ProjectTarget
+from binary_comp.core.asm_listing import function_lines
 from binary_comp.core.disasm import normalize_mnemonic
-from binary_comp.core.ghidra import function_starts_from_export_dir
+from binary_comp.core.ghidra import function_starts_from_export_dir, resolve_export
 from binary_comp.core.mapfile import function_starts_from_map
 from binary_comp.core.pe import PEImage
 from binary_comp.source.functions import load_source_groups
@@ -57,20 +58,6 @@ class SimilarityReport:
     errors: int
     missing_asm: int
     asm_fallbacks: int
-
-
-def disassembly_path(target: ProjectTarget, address: int) -> str | None:
-    if not target.code_dir:
-        return None
-    candidates = (
-        os.path.join(target.code_dir, f"FUN_{address:08X}.disassembled.txt"),
-        os.path.join(target.code_dir, f"FUN_{address:06X}.disassembled.txt"),
-        os.path.join(target.code_dir, f"FUN_{address:X}.disassembled.txt"),
-    )
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return candidates[0]
 
 
 def asm_path_for_source(target: ProjectTarget, source_path: str) -> str | None:
@@ -112,39 +99,17 @@ def extract_asm_mnemonics(
     function_name: str,
     occurrence_index: int,
 ) -> list[str]:
-    try:
-        with open(asm_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except OSError:
-        return []
-
-    current_index = -1
-    in_function = False
     mnemonics: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not in_function:
-            if "PROC" not in stripped:
-                continue
-            if "; " not in stripped:
-                continue
-            comment = stripped.split("; ", 1)[1].strip()
-            if comment.endswith(", COMDAT"):
-                comment = comment[:-len(", COMDAT")].strip()
-            if comment != function_name:
-                continue
-            current_index += 1
-            if current_index != occurrence_index:
-                continue
-            in_function = True
-            continue
-
-        if re.search(r"\bENDP\b", stripped):
-            break
+    for stripped in function_lines(
+        asm_path,
+        function_name,
+        occurrence_index,
+        match_symbol=False,
+        stop_at_segment_end=False,
+    ):
         mnemonic = asm_line_mnemonic(stripped)
         if mnemonic is not None:
             mnemonics.append(mnemonic)
-
     return mnemonics
 
 
@@ -324,7 +289,7 @@ class _ReportBuilder:
         """
         chunk_paths: list[str] = []
         for address_text in group.addresses:
-            path = disassembly_path(self.target, int(address_text, 16))
+            path = resolve_export(self.target.code_dir, int(address_text, 16))
             if path is None or not os.path.exists(path):
                 return False
             chunk_paths.append(path)
@@ -378,7 +343,7 @@ class _ReportBuilder:
 
     def compare_address(self, source_path: str, group, occurrence_index: int, address: int) -> None:
         source_file = os.path.basename(source_path)
-        path = disassembly_path(self.target, address)
+        path = resolve_export(self.target.code_dir, address)
         if path is None or not os.path.exists(path):
             self.tally.add_missing_asm(source_file, group.name, address)
             return

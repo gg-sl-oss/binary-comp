@@ -309,3 +309,68 @@ _TEXT ENDS
     ) == [
         "READ:g_Source_00402010+0x2",
     ]
+
+
+def test_extract_compiled_global_accesses_leaves_out_eh_unwind_funclets(tmp_path):
+    asm = tmp_path / "sample.asm"
+    asm.write_text(
+        """
+_TEXT SEGMENT
+?Run@@YAXXZ PROC NEAR ; Run
+    mov eax, DWORD PTR ?g_Source_00402010@@3HA ; g_Source_00402010
+_TEXT ENDS
+text$x SEGMENT
+__unwindfunclet$?Run@@YAXXZ$0:
+    mov DWORD PTR ?g_Target_00402018@@3HA, eax ; g_Target_00402018
+text$x ENDS
+?Run@@YAXXZ ENDP
+""",
+        encoding="utf-8",
+    )
+
+    # The funclet's write used to be counted as part of Run.
+    assert extract_compiled_global_accesses(
+        str(asm),
+        "Run",
+        0,
+        frozenset({"g_Source_00402010", "g_Target_00402018"}),
+        frozenset(),
+    ) == ["READ:g_Source_00402010"]
+
+
+def test_check_global_accesses_reads_every_chunk_of_a_split_function(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from binary_comp.analyzers import global_access
+    from binary_comp.analyzers.calls import SelectedFunction
+
+    asm_path = tmp_path / "unit.asm"
+    asm_path.write_text("")
+    chunks = (str(tmp_path / "FUN_00401000.disassembled.txt"), str(tmp_path / "FUN_00402000.disassembled.txt"))
+    function = SelectedFunction(
+        "unit.cpp", "Split", 0, 0x00402000, chunks[-1], str(asm_path), chunks, (0x00401000, 0x00402000)
+    )
+    original_tokens = {chunks[0]: ["read:g_First"], chunks[1]: ["write:g_Second"]}
+
+    monkeypatch.setattr(global_access, "load_calls_policy", lambda config: SimpleNamespace(signature_overloads=frozenset(), build_args=()))
+    monkeypatch.setattr(global_access, "policy_with_same_address_aliases", lambda target, policy: policy)
+    monkeypatch.setattr(global_access, "select_functions", lambda *args: ([function], []))
+    monkeypatch.setattr(global_access, "maybe_build", lambda *args: None)
+    monkeypatch.setattr(global_access, "configured_global_decls", lambda config, target: [])
+    monkeypatch.setattr(global_access, "auto_global_ranges", lambda decls: [])
+    monkeypatch.setattr(global_access, "data_section_ranges", lambda target: [])
+    monkeypatch.setattr(
+        global_access, "extract_original_global_accesses", lambda path, *args, **kwargs: original_tokens[path]
+    )
+    monkeypatch.setattr(
+        global_access,
+        "extract_compiled_global_accesses",
+        lambda *args, **kwargs: ["read:g_First", "write:g_Second"],
+    )
+    target = SimpleNamespace(name="demo", code_dir=str(tmp_path), asm_dir=str(tmp_path), globals_source="globals.h")
+
+    summary = global_access.check_global_accesses({}, target, global_access.GlobalAccessOptions(show_all=True))
+
+    assert summary.functions_checked == 1
+    # Reading only the last chunk reported g_First as an extra access.
+    assert summary.mismatches == ()

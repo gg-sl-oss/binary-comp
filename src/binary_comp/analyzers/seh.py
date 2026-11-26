@@ -14,11 +14,9 @@ from dataclasses import dataclass
 
 import os
 
-from binary_comp.analyzers.function_compare import (
-    FunctionComparer,
-    parse_original_address,
-)
+from binary_comp.analyzers.function_compare import FunctionComparer
 from binary_comp.core.eh import EHInfo, analyze_function_eh
+from binary_comp.core.ghidra import export_address
 from binary_comp.source.functions import load_source_groups
 
 
@@ -255,7 +253,7 @@ def compare_function_seh(
     *,
     strict: bool = False,
 ) -> SehComparison:
-    original_addr = parse_original_address(disassembled_code_path)
+    original_addr = export_address(disassembled_code_path)
     if original_addr is None:
         raise ValueError("could not determine original function address")
 

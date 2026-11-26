@@ -18,13 +18,13 @@ from dataclasses import dataclass
 from binary_comp.build import maybe_build
 from binary_comp.analyzers.report import (
     SimilarityReportOptions,
-    disassembly_path,
     generate_similarity_report,
 )
 from binary_comp.config import ProjectTarget
+from binary_comp.core.ghidra import iter_exports, read_export_header, resolve_export
 from binary_comp.core.mapfile import parse_msvc_map_by_obj
 from binary_comp.core.pe import EXECUTABLE_FLAG, PEImage
-from binary_comp.source.functions import load_source_groups
+from binary_comp.source.functions import load_source_groups, object_member_name, source_object_name
 
 
 WRITABLE_FLAG = 0x80000000
@@ -174,31 +174,11 @@ def _address_in_ranges(address: int, ranges: tuple[tuple[int, int], ...]) -> boo
     return any(start <= address <= end for start, end in ranges)
 
 
-def _parse_export_address(path: str) -> int | None:
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as source:
-            for _ in range(6):
-                line = source.readline()
-                if not line:
-                    break
-                if line.startswith("Address:"):
-                    match = ADDRESS_RE.search(line)
-                    return int(match.group(0), 16) if match else None
-    except OSError:
-        return None
-    return None
-
-
 def _export_addresses(code_dir: str | None) -> set[int]:
-    addresses: set[int] = set()
-    if not code_dir or not os.path.isdir(code_dir):
-        return addresses
-    for filename in os.listdir(code_dir):
-        if not filename.startswith("FUN_") or not filename.endswith(".disassembled.txt"):
-            continue
-        address = _parse_export_address(os.path.join(code_dir, filename))
-        if address is not None:
-            addresses.add(address)
+    # The header address, which is the function entry even when a hand-made
+    # export's filename is spelled differently.
+    addresses = {read_export_header(path).address for _, path in iter_exports(code_dir)}
+    addresses.discard(None)
     return addresses
 
 
@@ -302,8 +282,7 @@ def _rebuilt_object_starts(target: ProjectTarget) -> dict[str, int]:
     for object_name, entries in parse_msvc_map_by_obj(target.map_path).items():
         if not entries:
             continue
-        basename = re.split(r"[:\\/]", object_name)[-1]
-        starts[basename.lower()] = min(entry.va for entry in entries)
+        starts[object_member_name(object_name).lower()] = min(entry.va for entry in entries)
     return starts
 
 
@@ -352,7 +331,7 @@ def _source_summaries(
             for previous, following in zip(definitions, definitions[1:])
             if following.address < previous.address
         )
-        object_name = os.path.splitext(source_file)[0].lower() + ".obj"
+        object_name = source_object_name(source_file).lower()
         summaries.append(SourceOrderSummary(
             source_path=source_path,
             source_file=source_file,
@@ -577,7 +556,7 @@ def generate_order_report(
 
     entries: list[OrderEntry] = []
     for address in sorted(starts):
-        path = disassembly_path(target, address)
+        path = resolve_export(target.code_dir, address)
         facts = _load_export_facts(path, image)
         entries.append(OrderEntry(
             address=address,

@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 
 from binary_comp.config import ProjectTarget
 from binary_comp.core.mapfile import function_starts_from_map, parse_msvc_map_by_obj
 from binary_comp.core.pe import PEImage, Section
-from binary_comp.source.functions import load_source_groups, map_source_groups
+from binary_comp.source.cpp import parse_source_function_comments
+from binary_comp.source.functions import C_SOURCE_EXTENSIONS, iter_source_files, load_source_groups, map_source_groups
 
 
 DEFAULT_BYTE_SECTIONS = (".text", ".rdata", ".data")
-FUNCTION_START_RE = re.compile(r"/\*\s*Function start:\s*(0x[0-9a-fA-F]+)\s*\*/")
 
 
 @dataclass(frozen=True)
@@ -132,15 +131,13 @@ def target_function_map_dirs(target: ProjectTarget) -> tuple[str, ...]:
 
 def original_function_addresses_from_map_dirs(map_dirs: tuple[str, ...]) -> tuple[int, ...]:
     addresses: set[int] = set()
-    for map_dir in map_dirs:
-        for root, _, files in os.walk(map_dir):
-            for filename in files:
-                if not filename.endswith((".c", ".cpp", ".C")):
-                    continue
-                path = os.path.join(root, filename)
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    for match in FUNCTION_START_RE.finditer(f.read()):
-                        addresses.add(int(match.group(1), 16))
+    # Every annotation counts, with or without a function after it: a map
+    # directory lists original functions that have not been rebuilt yet.
+    # ASM/STUB-marked and compiler-generated entries are left out, as they
+    # are everywhere else.
+    for path in iter_source_files(map_dirs, C_SOURCE_EXTENSIONS):
+        for marker in parse_source_function_comments(path):
+            addresses.add(int(marker.address, 16))
     return tuple(sorted(addresses))
 
 

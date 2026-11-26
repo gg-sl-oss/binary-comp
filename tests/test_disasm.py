@@ -14,6 +14,7 @@ from binary_comp.core.disasm import (
     Operand,
     disassemble_reachable_x86,
     disassemble_x86,
+    has_msvc_seh_frame,
     switch_jump_table_ranges,
     trim_leading_stack_probe,
 )
@@ -298,3 +299,27 @@ def test_read_jump_table_stops_at_range_table_end_and_entry_limit():
     assert read_jump_table(image, 0x401100, 0x401000, 0x401100, table_end=0x401108) == entries[:2]
     assert read_jump_table(image, 0x401100, 0x401000, 0x401100, max_entries=1) == entries[:1]
     assert read_jump_table(image, 0x401200, 0x401000, 0x401100) == []
+
+
+def _seh_prologue(*, write: bool) -> list[Instruction]:
+    def ins(address, mnemonic, op_str, operands=()):
+        return Instruction(address, mnemonic, op_str, tuple(operands), f"{mnemonic} {op_str}", 1)
+
+    prologue = [
+        ins(0, "push", "ebp"),
+        ins(1, "mov", "ebp, esp"),
+        ins(2, "push", "-1", [Operand("imm", "-1", imm=-1)]),
+        ins(3, "push", "0x401000"),
+        ins(4, "mov", "eax, dword ptr fs:[0]"),
+        ins(5, "push", "eax"),
+    ]
+    if write:
+        prologue.append(ins(6, "mov", "dword ptr fs:[0], esp"))
+    prologue.append(ins(7, "ret", ""))
+    return prologue
+
+
+def test_msvc_seh_frame_needs_both_the_fs_read_and_the_fs_write():
+    assert has_msvc_seh_frame(_seh_prologue(write=True))
+    # Reading fs:[0] alone used to count as the write as well.
+    assert not has_msvc_seh_frame(_seh_prologue(write=False))
