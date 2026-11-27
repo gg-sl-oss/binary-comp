@@ -323,3 +323,21 @@ def test_msvc_seh_frame_needs_both_the_fs_read_and_the_fs_write():
     assert has_msvc_seh_frame(_seh_prologue(write=True))
     # Reading fs:[0] alone used to count as the write as well.
     assert not has_msvc_seh_frame(_seh_prologue(write=False))
+
+
+def test_msvc_seh_frame_read_can_push_fs_directly():
+    def ins(address, mnemonic, op_str, operands=()):
+        return Instruction(address, mnemonic, op_str, tuple(operands), f"{mnemonic} {op_str}", 1)
+
+    prologue = [
+        ins(0, "push", "ebp"),
+        ins(1, "mov", "ebp, esp"),
+        ins(2, "push", "-1", [Operand("imm", "-1", imm=-1)]),
+        ins(3, "push", "0x401000"),
+        ins(4, "push", "dword ptr fs:[0]"),
+    ]
+    ret = ins(6, "ret", "")
+
+    assert has_msvc_seh_frame(prologue + [ins(5, "mov", "dword ptr fs:[0], esp"), ret])
+    # Still no frame without the write that installs it.
+    assert not has_msvc_seh_frame(prologue + [ret])

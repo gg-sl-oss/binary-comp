@@ -7,6 +7,7 @@ import subprocess
 from collections.abc import Sequence
 
 from binary_comp.config import ProjectTarget
+from binary_comp.core.mapfile import clear_map_cache
 
 
 class BuildError(RuntimeError):
@@ -24,6 +25,14 @@ def maybe_build(target: ProjectTarget, do_build: bool, extra_args: Sequence[str]
     """
     if not do_build:
         return
+    try:
+        _run_clean_and_build(target, extra_args)
+    finally:
+        # The build may have relinked maps that were already read this run.
+        clear_map_cache()
+
+
+def _run_clean_and_build(target: ProjectTarget, extra_args: Sequence[str]) -> None:
     if target.build.clean:
         clean_command = split_command(target.build.clean, "clean")
         result = subprocess.run(

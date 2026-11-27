@@ -74,3 +74,24 @@ def test_map_is_reread_after_it_changes(tmp_path):
     # Inline ("f i") lines are not part of the by-object view.
     assert [entry.symbol for entry in parse_msvc_map_by_obj(str(map_path))["main.obj"]] == ["_main", "_other"]
     assert parse_msvc_map_by_obj(str(tmp_path / "missing.map")) == {}
+
+
+def test_map_is_reread_when_rewritten_with_the_same_size_and_mtime(tmp_path):
+    import os
+    import time
+
+    from binary_comp.core.mapfile import parse_msvc_map_symbols
+
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(" 0001:00000000       _foo_00401000   00401000 f   a.obj\n", encoding="latin1")
+    stat = os.stat(map_path)
+    assert [hex(entry.va) for entry in parse_msvc_map_symbols(str(map_path))] == ["0x401000"]
+
+    # A relink on a filesystem with coarse timestamps: same size, same mtime.
+    # The kernel stamps ctime from a clock that ticks every few milliseconds,
+    # so let one tick pass, as any real relink does.
+    time.sleep(0.05)
+    map_path.write_text(" 0001:00000000       _foo_00401000   00405000 f   a.obj\n", encoding="latin1")
+    os.utime(map_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    assert [hex(entry.va) for entry in parse_msvc_map_symbols(str(map_path))] == ["0x405000"]
