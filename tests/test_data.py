@@ -640,6 +640,32 @@ def test_load_data_globals_reads_addresses_inside_names(tmp_path):
     assert [decl.name for decl in strict] == ["g_Count_00402000"]
 
 
+def test_load_data_globals_sizes_strings_with_c_escapes_and_non_ascii(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
+    globals_path = tmp_path / "globals.cpp"
+    globals_path.write_text(
+        'char g_Accent_00402000[] = "h\u00e9llo w";\n'
+        'char g_Euro_00402010[] = "5\u20ac";\n'
+        'char g_Qmark_00402020[] = "a\\?b";\n'
+        'char g_Octal_00402030[] = "\\101\\0\\12x";\n'
+        'char g_Hex_00402040[] = "\\x41\\x4142";\n'
+        'char g_Joined_00402050[] = "ab" "cd";\n',
+        encoding="utf-8",
+    )
+
+    sizes = {decl.name: decl.size for decl in load_data_globals(str(globals_path))}
+
+    assert sizes == {
+        "g_Accent_00402000": 8,  # one byte per character, plus the NUL
+        "g_Euro_00402010": 3,
+        "g_Qmark_00402020": 4,
+        "g_Octal_00402030": 5,
+        "g_Hex_00402040": 3,
+        "g_Joined_00402050": 5,
+    }
+
+
 def test_load_data_globals_sizes(tmp_path):
     pytest.importorskip("tree_sitter")
     pytest.importorskip("tree_sitter_cpp")

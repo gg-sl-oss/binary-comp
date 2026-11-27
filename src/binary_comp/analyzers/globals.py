@@ -1,6 +1,5 @@
 """Audit global declarations against original executable data."""
 
-import ast
 import os
 import re
 import struct
@@ -699,20 +698,76 @@ def infer_size(decl: GlobalDecl, constants: Dict[str, int], next_addr: Optional[
     return elem * count
 
 
-def parse_c_string_bytes(literal: str) -> bytes:
-    literal = literal.strip()
-    parts = re.findall(r'"(?:\\.|[^"\\])*"', literal)
-    if not parts:
-        raise ValueError(literal)
+_C_SIMPLE_ESCAPES = {
+    "n": 0x0A, "t": 0x09, "r": 0x0D, "b": 0x08, "f": 0x0C, "v": 0x0B, "a": 0x07,
+    "\\": 0x5C, "'": 0x27, '"': 0x22, "?": 0x3F,
+}
+_OCTAL_DIGITS = "01234567"
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _source_char_byte(ch: str) -> int:
+    """The byte a narrow literal stores for one source character.
+
+    Every character counts as one byte, as it always has here. Characters
+    outside ASCII are taken as Windows-1252, the code page of these
+    compilers' Western editions, falling back to the code point's low byte.
+    """
+    try:
+        encoded = ch.encode("cp1252")
+    except UnicodeEncodeError:
+        return ord(ch) & 0xFF
+    return encoded[0] if len(encoded) == 1 else ord(ch) & 0xFF
+
+
+def decode_c_literal_body(body: str) -> bytes:
+    """Bytes of the text between a narrow C literal's quotes, C escapes applied."""
     out = bytearray()
-    for part in parts:
-        value = ast.literal_eval("b" + part)
-        out.extend(value)
+    index = 0
+    while index < len(body):
+        ch = body[index]
+        if ch != "\\" or index + 1 == len(body):
+            out.append(_source_char_byte(ch))
+            index += 1
+            continue
+        esc = body[index + 1]
+        if esc in _C_SIMPLE_ESCAPES:
+            out.append(_C_SIMPLE_ESCAPES[esc])
+            index += 2
+        elif esc in _OCTAL_DIGITS:
+            end = index + 1
+            while end < len(body) and end < index + 4 and body[end] in _OCTAL_DIGITS:
+                end += 1
+            out.append(int(body[index + 1:end], 8) & 0xFF)
+            index = end
+        elif esc == "x" and index + 2 < len(body) and body[index + 2] in _HEX_DIGITS:
+            end = index + 2
+            while end < len(body) and body[end] in _HEX_DIGITS:
+                end += 1
+            out.append(int(body[index + 2:end], 16) & 0xFF)
+            index = end
+        else:
+            # An unknown escape stands for the character itself.
+            out.append(_source_char_byte(esc))
+            index += 2
     return bytes(out)
 
 
+def parse_c_string_bytes(literal: str) -> bytes:
+    """Bytes of a narrow C string literal, adjacent literals concatenated,
+    without the terminating NUL."""
+    literal = literal.strip()
+    parts = re.findall(r'"((?:\\.|[^"\\])*)"', literal)
+    if not parts:
+        raise ValueError(literal)
+    return b"".join(decode_c_literal_body(part) for part in parts)
+
+
 def parse_c_char_value(token: str) -> int:
-    value = ast.literal_eval("b" + token.strip())
+    token = token.strip()
+    if len(token) < 3 or token[0] != "'" or token[-1] != "'":
+        raise ValueError(token)
+    value = decode_c_literal_body(token[1:-1])
     if len(value) != 1:
         raise ValueError(token)
     return value[0]
