@@ -70,14 +70,14 @@ def absolute_memory(address, size=8):
     return Operand("mem", "", scale=1, disp=address, size=size)
 
 
-def dialogue_blocks(order, base):
+def string_blocks(order, base):
     instrs = []
     addresses = {"A": 0x5000, "B": 0x5100}
-    frames = {"A": 5, "B": 0}
+    constants = {"A": 5, "B": 0}
     for name in order:
         block = base + len(instrs) * 4
         instrs.extend([
-            instruction(block + 0, "push", (immediate(frames[name]),)),
+            instruction(block + 0, "push", (immediate(constants[name]),)),
             instruction(block + 1, "push", (immediate(addresses[name]),)),
             instruction(block + 2, "push", (immediate(0),)),
             Instruction(
@@ -1072,9 +1072,9 @@ def test_reordered_push_values_are_reconciled_by_call_argument_and_literal():
         compiled_diagnostic_targets=frozenset(),
         original_diagnostic_targets=frozenset(),
     )
-    image = StringsImage({0x5000: "dialogue A", 0x5100: "dialogue B"})
-    compiled = dialogue_blocks(("A", "B"), 0x1000)
-    original = dialogue_blocks(("B", "A"), 0x2000)
+    image = StringsImage({0x5000: "string A", 0x5100: "string B"})
+    compiled = string_blocks(("A", "B"), 0x1000)
+    original = string_blocks(("B", "A"), 0x2000)
 
     assert equivalent_reordered_push_values(
         compiled, original, image, image, 0, 0, 5, 0, context
@@ -1090,9 +1090,9 @@ def test_changed_push_value_is_not_hidden_by_reordered_blocks():
         compiled_diagnostic_targets=frozenset(),
         original_diagnostic_targets=frozenset(),
     )
-    image = StringsImage({0x5000: "dialogue A", 0x5100: "dialogue B"})
-    compiled = dialogue_blocks(("A", "B"), 0x1000)
-    original = dialogue_blocks(("B", "A"), 0x2000)
+    image = StringsImage({0x5000: "string A", 0x5100: "string B"})
+    compiled = string_blocks(("A", "B"), 0x1000)
+    original = string_blocks(("B", "A"), 0x2000)
     original[5] = instruction(original[5].address, "push", (immediate(6),))
 
     assert not equivalent_reordered_push_values(

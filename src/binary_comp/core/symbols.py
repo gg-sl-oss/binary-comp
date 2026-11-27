@@ -104,8 +104,8 @@ def normalize_compiled(name: str, signature_names: frozenset[str] = frozenset())
 
     For names listed in ``signature_names`` (overloaded methods), the decoded
     pointer-parameter types are appended, e.g.
-    ``?PopSafe@TimedEventPool@@QAEPAVSpriteAction@@PAV2@@Z`` ->
-    ``TimedEventPool::PopSafe(SpriteAction*)``.
+    ``?Pop@EventQueue@@QAEPAVEvent@@PAV2@@Z`` ->
+    ``EventQueue::Pop(Event*)``.
     """
     name = name.strip()
     if name.startswith("??0") and "@@" in name:
