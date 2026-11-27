@@ -468,3 +468,21 @@ def test_string_array_with_a_url_initializer_is_encoded():
     )
     # strip_comments used to cut the string at "//" and parsing then raised.
     assert numeric_array_bytes(decl, {}, types=globals_types({})) == (b"http://x\0", "")
+
+
+def test_c_literals_decode_with_c_escapes_and_one_byte_per_character():
+    from binary_comp.analyzers.globals import parse_c_char_value, parse_c_string_bytes
+
+    assert parse_c_string_bytes('"a\\?b"') == b"a?b"
+    assert parse_c_string_bytes('"\\101\\0\\12x\\777"') == b"A\x00\nx\xff"
+    assert parse_c_string_bytes('"\\x41\\x4142\\q"') == b"ABq"  # a hex escape takes every hex digit after it
+    assert parse_c_string_bytes('"tab\\there" "\\\\\\""') == b"tab\there\\\""
+    # Outside ASCII: Windows-1252 where it has the character, else the low byte.
+    assert parse_c_string_bytes('"h\u00e9 5\u20ac \u0101"') == b"h\xe9 5\x80 \x01"
+    assert parse_c_char_value("'\\?'") == ord("?")
+    assert parse_c_char_value("'\u00e9'") == 0xE9
+    assert parse_c_char_value("'\\x7f'") == 0x7F
+    with pytest.raises(ValueError):
+        parse_c_char_value("'ab'")
+    with pytest.raises(ValueError):
+        parse_c_string_bytes("no quotes")

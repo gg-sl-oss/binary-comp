@@ -1,12 +1,11 @@
 """Audit global declarations against original executable data."""
 
-import ast
 import os
 import re
 import struct
 from bisect import bisect_right
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
     from capstone import Cs, CS_ARCH_X86, CS_MODE_32
@@ -281,8 +280,9 @@ def address_from_comments(text: str) -> Optional[int]:
     return None
 
 
-def address_for_declaration(name: str, leading: str, statement: str, trailing: str) -> Optional[int]:
-    address = encoded_address(name)
+def address_for_declaration(name: str, leading: str, statement: str, trailing: str,
+                            name_address: Callable[[str], Optional[int]] = encoded_address) -> Optional[int]:
+    address = name_address(name)
     if address is not None:
         return address
     # The declaration's own annotation outranks a preceding module comment.
@@ -489,14 +489,15 @@ def trailing_comments_after(source: bytes, end: int) -> str:
 
 def parse_globals_file(path: str,
                        require_extern: bool,
-                       address_warnings: Optional[List[AddressWarning]] = None) -> List[GlobalDecl]:
+                       address_warnings: Optional[List[AddressWarning]] = None,
+                       name_address: Callable[[str], Optional[int]] = encoded_address) -> List[GlobalDecl]:
     if not path or not os.path.exists(path):
         return []
     if os.path.isdir(path):
         suffixes = (".h", ".hh", ".hpp", ".hxx") if require_extern else (".c", ".cc", ".cpp", ".cxx")
         result: List[GlobalDecl] = []
         for file_path in iter_source_files([path], suffixes, ignore_case=True):
-            result.extend(parse_globals_file(file_path, require_extern, address_warnings))
+            result.extend(parse_globals_file(file_path, require_extern, address_warnings, name_address))
         return result
     with open(path, "rb") as f:
         source = f.read()
@@ -524,7 +525,7 @@ def parse_globals_file(path: str,
         statement = node_text(source, node).strip()
         leading = leading_comments_before(source, node.start_byte)
         trailing = trailing_comments_after(source, node.end_byte)
-        address = address_for_declaration(name, leading, statement, trailing)
+        address = address_for_declaration(name, leading, statement, trailing, name_address)
         if address is None:
             if address_warnings is not None:
                 context = "\n".join([leading, statement, trailing])
@@ -552,8 +553,15 @@ def parse_globals_file(path: str,
 
 
 def parse_globals_source(path: str,
-                         address_warnings: Optional[List[AddressWarning]] = None) -> List[GlobalDecl]:
-    return parse_globals_file(path, require_extern=False, address_warnings=address_warnings)
+                         address_warnings: Optional[List[AddressWarning]] = None,
+                         name_address: Callable[[str], Optional[int]] = encoded_address) -> List[GlobalDecl]:
+    """Addressed global definitions in ``path`` (a file or a directory).
+
+    ``name_address`` reads an address from a declaration's name; comments
+    are consulted when it finds none.
+    """
+    return parse_globals_file(path, require_extern=False, address_warnings=address_warnings,
+                              name_address=name_address)
 
 
 def parse_globals_header(path: str,
@@ -690,20 +698,76 @@ def infer_size(decl: GlobalDecl, constants: Dict[str, int], next_addr: Optional[
     return elem * count
 
 
-def parse_c_string_bytes(literal: str) -> bytes:
-    literal = literal.strip()
-    parts = re.findall(r'"(?:\\.|[^"\\])*"', literal)
-    if not parts:
-        raise ValueError(literal)
+_C_SIMPLE_ESCAPES = {
+    "n": 0x0A, "t": 0x09, "r": 0x0D, "b": 0x08, "f": 0x0C, "v": 0x0B, "a": 0x07,
+    "\\": 0x5C, "'": 0x27, '"': 0x22, "?": 0x3F,
+}
+_OCTAL_DIGITS = "01234567"
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _source_char_byte(ch: str) -> int:
+    """The byte a narrow literal stores for one source character.
+
+    Every character counts as one byte, as it always has here. Characters
+    outside ASCII are taken as Windows-1252, the code page of these
+    compilers' Western editions, falling back to the code point's low byte.
+    """
+    try:
+        encoded = ch.encode("cp1252")
+    except UnicodeEncodeError:
+        return ord(ch) & 0xFF
+    return encoded[0] if len(encoded) == 1 else ord(ch) & 0xFF
+
+
+def decode_c_literal_body(body: str) -> bytes:
+    """Bytes of the text between a narrow C literal's quotes, C escapes applied."""
     out = bytearray()
-    for part in parts:
-        value = ast.literal_eval("b" + part)
-        out.extend(value)
+    index = 0
+    while index < len(body):
+        ch = body[index]
+        if ch != "\\" or index + 1 == len(body):
+            out.append(_source_char_byte(ch))
+            index += 1
+            continue
+        esc = body[index + 1]
+        if esc in _C_SIMPLE_ESCAPES:
+            out.append(_C_SIMPLE_ESCAPES[esc])
+            index += 2
+        elif esc in _OCTAL_DIGITS:
+            end = index + 1
+            while end < len(body) and end < index + 4 and body[end] in _OCTAL_DIGITS:
+                end += 1
+            out.append(int(body[index + 1:end], 8) & 0xFF)
+            index = end
+        elif esc == "x" and index + 2 < len(body) and body[index + 2] in _HEX_DIGITS:
+            end = index + 2
+            while end < len(body) and body[end] in _HEX_DIGITS:
+                end += 1
+            out.append(int(body[index + 2:end], 16) & 0xFF)
+            index = end
+        else:
+            # An unknown escape stands for the character itself.
+            out.append(_source_char_byte(esc))
+            index += 2
     return bytes(out)
 
 
+def parse_c_string_bytes(literal: str) -> bytes:
+    """Bytes of a narrow C string literal, adjacent literals concatenated,
+    without the terminating NUL."""
+    literal = literal.strip()
+    parts = re.findall(r'"((?:\\.|[^"\\])*)"', literal)
+    if not parts:
+        raise ValueError(literal)
+    return b"".join(decode_c_literal_body(part) for part in parts)
+
+
 def parse_c_char_value(token: str) -> int:
-    value = ast.literal_eval("b" + token.strip())
+    token = token.strip()
+    if len(token) < 3 or token[0] != "'" or token[-1] != "'":
+        raise ValueError(token)
+    value = decode_c_literal_body(token[1:-1])
     if len(value) != 1:
         raise ValueError(token)
     return value[0]

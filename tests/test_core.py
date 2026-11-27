@@ -56,6 +56,17 @@ def test_encoded_address_reads_the_trailing_address_of_a_name():
     assert encoded_address("g_Count") is None
 
 
+def test_embedded_address_reads_an_address_anywhere_in_a_name():
+    from binary_comp.core.symbols import embedded_address
+
+    assert embedded_address("g_Table_00402000") == 0x402000
+    assert embedded_address("g_00402010_flags") == 0x402010
+    assert embedded_address("g_Table_00402000_old") == 0x402000
+    assert embedded_address("s_cfg_031568_dat_0046bdd0") == 0x46BDD0
+    assert embedded_address("g_Table00402000") is None
+    assert embedded_address("g_Count") is None
+
+
 def test_map_is_reread_after_it_changes(tmp_path):
     import os
 
