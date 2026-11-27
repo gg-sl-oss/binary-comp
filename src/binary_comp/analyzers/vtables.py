@@ -1133,6 +1133,203 @@ def is_trivial_function_type(ftype: str) -> bool:
     return ftype in TRIVIAL_FUNCTION_TYPES
 
 
+MISSING_STUB_TAGS = {
+    "stub": "RET",
+    "ret0": "return 0",
+    "ret1": "return 1",
+    "retconst": "return constant",
+    "fieldget": "simple field getter",
+    "thunk": "jump thunk",
+}
+
+
+@dataclass(frozen=True)
+class ReportInputs:
+    """What every class report draws on, gathered once for all classes."""
+
+    classes: dict[str, ClassInfo]
+    vtables: dict[str, tuple[int, ...]]
+    func_types: dict[int, str]
+    implementations: dict[int, list[tuple[str, int]]]
+    function_symbols: dict[int, list[SourceSymbol]]
+    expected_slots: dict[str, list[ClassMethod | None]]
+    policy: VtablePolicy
+
+
+def parent_vtable_entries(inputs: ReportInputs, class_name: str, depth: int = 0) -> tuple[int, ...]:
+    """The entries of the nearest ancestor whose vtable was read."""
+    if depth > 10:
+        return ()
+    info = inputs.classes.get(class_name)
+    if not info or not info.parent:
+        return ()
+    if info.parent in inputs.vtables:
+        return inputs.vtables[info.parent]
+    return parent_vtable_entries(inputs, info.parent, depth + 1)
+
+
+def parent_chain(classes: dict[str, ClassInfo], class_name: str) -> list[str]:
+    chain = []
+    cur = class_name
+    while cur and cur in classes:
+        chain.append(cur)
+        cur = classes[cur].parent
+    return chain
+
+
+def configured_slot_names(inputs: ReportInputs, class_name: str) -> dict[int, str]:
+    chain = parent_chain(inputs.classes, class_name)
+    for item in inputs.policy.slot_name_sets:
+        if item["class_or_ancestor"] in chain:
+            return item["slots"]
+    return {}
+
+
+@dataclass(frozen=True)
+class ClassSlots:
+    """What the headers and config expect in each slot of one class's vtable."""
+
+    class_name: str
+    expected: list[ClassMethod | None]
+    names: dict[int, str]
+
+    def expected_for(self, slot_idx: int) -> ClassMethod | None:
+        if slot_idx < len(self.expected):
+            return self.expected[slot_idx]
+        return None
+
+    def label(self, slot_idx: int) -> str:
+        expected = self.expected_for(slot_idx)
+        if expected is not None:
+            return expected.method_name
+        return self.names.get(slot_idx, "")
+
+    def is_sdtor(self, slot_idx: int) -> bool:
+        expected = self.expected_for(slot_idx)
+        if expected is not None and expected.signature_key == "__dtor__":
+            return True
+        return slot_idx in (0, 3)
+
+
+def slot_symbol_matches(inputs: ReportInputs, slots: ClassSlots, slot_idx: int, func_addr: int) -> bool:
+    """Does the source symbol at ``func_addr`` fit the method the slot expects?
+
+    Slots without a usable expectation (skipped by config, unknown,
+    destructors) and trivial functions shared by many slots always match.
+    """
+    expected = slots.expected_for(slot_idx)
+    if (
+        slot_idx in inputs.policy.skip_symbol_slots
+        or expected is None
+        or expected.signature_key == "__dtor__"
+        or is_trivial_function_type(inputs.func_types.get(func_addr, "unknown"))
+    ):
+        return True
+    aliases = inputs.policy.slot_symbol_aliases.get((slots.class_name, slot_idx), set())
+    for sym in inputs.function_symbols.get(func_addr, []):
+        candidate = (sym.class_name, sym.method_name)
+        if candidate == (expected.class_name, expected.method_name) or candidate in aliases:
+            return True
+    return False
+
+
+def dump_class_slots(
+    inputs: ReportInputs,
+    slots: ClassSlots,
+    entries: tuple[int, ...],
+    parent_entries: tuple[int, ...],
+) -> tuple[str, ...]:
+    parent_str = inputs.classes[slots.class_name].parent or "(root)"
+    lines = []
+    for idx, func_addr in enumerate(entries):
+        is_inherited = idx < len(parent_entries) and parent_entries[idx] == func_addr
+        ftype = inputs.func_types.get(func_addr, "?")
+        marker = " " if is_inherited else "*"
+        if is_inherited:
+            status = f"inherited ({parent_str})"
+        elif func_addr in inputs.implementations:
+            if slot_symbol_matches(inputs, slots, idx, func_addr):
+                locs = inputs.implementations[func_addr]
+                status = f"OK <- {', '.join(f'{file}:{line}' for file, line in locs)}"
+            else:
+                symbols = inputs.function_symbols.get(func_addr, [])
+                status = f"MISMATCH expected {slots.expected_for(idx).display_name} got {format_symbol_list(symbols)}"
+        elif ftype == "purecall":
+            status = "purecall (declared `= 0`)"
+        elif slots.is_sdtor(idx):
+            status = "sdtor (compiler-generated)"
+        elif is_trivial_function_type(ftype):
+            status = f"MISSING ({ftype})"
+        elif ftype == "error":
+            status = "MISSING (error helper call)"
+        else:
+            status = "MISSING"
+        label = slots.label(idx)
+        name_str = f" {label}" if label else ""
+        lines.append(f"  {marker} [{idx:2d}]{name_str:<18} 0x{func_addr:08X}  {status}")
+    return tuple(lines)
+
+
+def build_class_report(inputs: ReportInputs, class_name: str, dump: bool) -> ClassReport:
+    info = inputs.classes[class_name]
+    entries = inputs.vtables[class_name]
+    parent_entries = parent_vtable_entries(inputs, class_name)
+    slots = ClassSlots(
+        class_name=class_name,
+        expected=inputs.expected_slots.get(class_name, []),
+        names=configured_slot_names(inputs, class_name),
+    )
+
+    inherited = 0
+    overrides = []
+    for idx, func_addr in enumerate(entries):
+        if idx < len(parent_entries) and parent_entries[idx] == func_addr:
+            inherited += 1
+        else:
+            overrides.append((idx, func_addr))
+
+    n_impl = n_sdtor = n_purecall = 0
+    missing_real = []
+    missing_stubs = []
+    symbol_mismatches = []
+    for slot_idx, func_addr in overrides:
+        ftype = inputs.func_types.get(func_addr, "unknown")
+        label = slots.label(slot_idx)
+        if func_addr in inputs.implementations:
+            n_impl += 1
+            if not slot_symbol_matches(inputs, slots, slot_idx, func_addr):
+                symbols = tuple(inputs.function_symbols.get(func_addr, []))
+                symbol_mismatches.append((slot_idx, func_addr, slots.expected_for(slot_idx), symbols, label))
+        elif ftype == "purecall":
+            n_purecall += 1
+        elif slots.is_sdtor(slot_idx):
+            n_sdtor += 1
+        elif is_trivial_function_type(ftype):
+            missing_stubs.append((slot_idx, func_addr, ftype, label, MISSING_STUB_TAGS.get(ftype, ftype)))
+        else:
+            missing_real.append((slot_idx, func_addr, ftype, label))
+
+    return ClassReport(
+        name=class_name,
+        vtable_addr=info.vtable_addr,
+        parent=info.parent,
+        header=info.header,
+        entries=entries,
+        inherited=inherited,
+        overrides=len(overrides),
+        implemented=n_impl,
+        sdtors=n_sdtor,
+        purecalls=n_purecall,
+        stubs=len(missing_stubs),
+        missing_real=len(missing_real),
+        symbol_mismatch=len(symbol_mismatches),
+        missing_real_items=tuple(missing_real),
+        missing_stub_items=tuple(missing_stubs),
+        symbol_mismatch_items=tuple(symbol_mismatches),
+        dump_lines=dump_class_slots(inputs, slots, entries, parent_entries) if dump else (),
+    )
+
+
 def build_class_reports(
     sources: VtableSources,
     image: PEImage,
@@ -1144,13 +1341,9 @@ def build_class_reports(
     options: VtableOptions,
     policy: VtablePolicy,
 ) -> tuple[tuple[ClassReport, ...], dict[str, int], tuple[int, ...]]:
-    implementations = sources.implementations
-    function_symbols = sources.function_symbols
-    class_methods = sources.headers.class_methods
-
     expected_slots: dict[str, list[ClassMethod | None]] = {}
     for class_name in classes:
-        build_expected_vtable_slots(class_name, classes, class_methods, expected_slots, policy)
+        build_expected_vtable_slots(class_name, classes, sources.headers.class_methods, expected_slots, policy)
 
     vtables = read_class_vtables(image, classes, all_vtable_addrs, code_start, code_end)
 
@@ -1160,207 +1353,37 @@ def build_class_reports(
             if func_addr not in func_types:
                 func_types[func_addr] = classify_function(image, starts, func_addr)
 
-    def get_parent_entries(class_name: str, depth: int = 0) -> tuple[int, ...]:
-        if depth > 10:
-            return ()
-        info = classes.get(class_name)
-        if not info or not info.parent:
-            return ()
-        parent = info.parent
-        if parent in vtables:
-            return vtables[parent]
-        return get_parent_entries(parent, depth + 1)
-
-    def parent_chain_for(class_name: str) -> list[str]:
-        chain = []
-        cur = class_name
-        while cur and cur in classes:
-            chain.append(cur)
-            cur = classes[cur].parent
-        return chain
-
-    def slot_names_for(class_name: str) -> dict[int, str]:
-        chain = parent_chain_for(class_name)
-        for item in policy.slot_name_sets:
-            if item["class_or_ancestor"] in chain:
-                return item["slots"]
-        return {}
-
-    def matches_expected_symbol(class_name: str, slot_idx: int, expected: ClassMethod | None, symbols) -> bool:
-        if expected is None:
-            return True
-        aliases = policy.slot_symbol_aliases.get((class_name, slot_idx), set())
-        for sym in symbols:
-            candidate = (sym.class_name, sym.method_name)
-            if candidate == (expected.class_name, expected.method_name) or candidate in aliases:
-                return True
-        return False
-
-    reports = []
-    totals = {
-        "slots": 0,
-        "inherited": 0,
-        "overrides": 0,
-        "implemented": 0,
-        "sdtors": 0,
-        "purecalls": 0,
-        "stubs": 0,
-        "missing_real": 0,
-        "symbol_mismatch": 0,
-        "implementations_count": len(implementations),
-    }
-
+    inputs = ReportInputs(
+        classes=classes,
+        vtables=vtables,
+        func_types=func_types,
+        implementations=sources.implementations,
+        function_symbols=sources.function_symbols,
+        expected_slots=expected_slots,
+        policy=policy,
+    )
     sorted_classes = sorted(
         [class_name for class_name in vtables if not options.filter_class or class_name == options.filter_class],
         key=lambda class_name: classes[class_name].vtable_addr,
     )
+    reports = tuple(build_class_report(inputs, class_name, options.dump) for class_name in sorted_classes)
 
-    for class_name in sorted_classes:
-        info = classes[class_name]
-        entries = vtables[class_name]
-        parent_entries = get_parent_entries(class_name)
-        slot_names = slot_names_for(class_name)
-        slot_expectations = expected_slots.get(class_name, [])
-
-        def expected_for_slot(slot_idx: int):
-            if slot_idx < len(slot_expectations):
-                return slot_expectations[slot_idx]
-            return None
-
-        def slot_label(slot_idx: int) -> str:
-            expected = expected_for_slot(slot_idx)
-            if expected is not None:
-                return expected.method_name
-            return slot_names.get(slot_idx, "")
-
-        def is_sdtor_slot(slot_idx: int) -> bool:
-            expected = expected_for_slot(slot_idx)
-            if expected is not None and expected.signature_key == "__dtor__":
-                return True
-            return slot_idx in (0, 3)
-
-        inherited = 0
-        overrides = []
-        for idx, func_addr in enumerate(entries):
-            if idx < len(parent_entries) and parent_entries[idx] == func_addr:
-                inherited += 1
-            else:
-                overrides.append((idx, func_addr))
-
-        n_impl = n_sdtor = n_purecall = n_stub_missing = n_real_missing = n_symbol_mismatch = 0
-        missing_real = []
-        missing_stubs = []
-        symbol_mismatches = []
-        dump_lines = []
-
-        for slot_idx, func_addr in overrides:
-            is_impl = func_addr in implementations
-            ftype = func_types.get(func_addr, "unknown")
-            expected = expected_for_slot(slot_idx)
-            symbols = function_symbols.get(func_addr, [])
-            label = slot_label(slot_idx)
-
-            if is_impl:
-                n_impl += 1
-                if (
-                    slot_idx not in policy.skip_symbol_slots
-                    and expected is not None
-                    and expected.signature_key != "__dtor__"
-                    and not is_trivial_function_type(ftype)
-                ):
-                    if not matches_expected_symbol(class_name, slot_idx, expected, symbols):
-                        n_symbol_mismatch += 1
-                        symbol_mismatches.append((slot_idx, func_addr, expected, tuple(symbols), label))
-            elif ftype == "purecall":
-                n_purecall += 1
-            elif is_sdtor_slot(slot_idx):
-                n_sdtor += 1
-            elif is_trivial_function_type(ftype):
-                n_stub_missing += 1
-                tag = {
-                    "stub": "RET",
-                    "ret0": "return 0",
-                    "ret1": "return 1",
-                    "retconst": "return constant",
-                    "fieldget": "simple field getter",
-                    "thunk": "jump thunk",
-                }.get(ftype, ftype)
-                missing_stubs.append((slot_idx, func_addr, ftype, label, tag))
-            else:
-                n_real_missing += 1
-                missing_real.append((slot_idx, func_addr, ftype, label))
-
-        if options.dump:
-            parent_str = info.parent or "(root)"
-            for idx, func_addr in enumerate(entries):
-                is_inherited = idx < len(parent_entries) and parent_entries[idx] == func_addr
-                is_impl = func_addr in implementations
-                ftype = func_types.get(func_addr, "?")
-                expected = expected_for_slot(idx)
-                symbols = function_symbols.get(func_addr, [])
-                marker = " " if is_inherited else "*"
-                if is_inherited:
-                    status = f"inherited ({parent_str})"
-                elif is_impl:
-                    matches = True
-                    if (
-                        idx not in policy.skip_symbol_slots
-                        and expected is not None
-                        and expected.signature_key != "__dtor__"
-                        and not is_trivial_function_type(ftype)
-                    ):
-                        matches = matches_expected_symbol(class_name, idx, expected, symbols)
-                    if matches:
-                        locs = implementations[func_addr]
-                        status = f"OK <- {', '.join(f'{file}:{line}' for file, line in locs)}"
-                    else:
-                        status = f"MISMATCH expected {expected.display_name} got {format_symbol_list(symbols)}"
-                elif ftype == "purecall":
-                    status = "purecall (declared `= 0`)"
-                elif is_sdtor_slot(idx):
-                    status = "sdtor (compiler-generated)"
-                elif is_trivial_function_type(ftype):
-                    status = f"MISSING ({ftype})"
-                elif ftype == "error":
-                    status = "MISSING (error helper call)"
-                else:
-                    status = "MISSING"
-                name_str = f" {slot_label(idx)}" if slot_label(idx) else ""
-                dump_lines.append(f"  {marker} [{idx:2d}]{name_str:<18} 0x{func_addr:08X}  {status}")
-
-        totals["slots"] += len(entries)
-        totals["inherited"] += inherited
-        totals["overrides"] += len(overrides)
-        totals["implemented"] += n_impl
-        totals["sdtors"] += n_sdtor
-        totals["purecalls"] += n_purecall
-        totals["stubs"] += n_stub_missing
-        totals["missing_real"] += n_real_missing
-        totals["symbol_mismatch"] += n_symbol_mismatch
-
-        reports.append(ClassReport(
-            name=class_name,
-            vtable_addr=info.vtable_addr,
-            parent=info.parent,
-            header=info.header,
-            entries=entries,
-            inherited=inherited,
-            overrides=len(overrides),
-            implemented=n_impl,
-            sdtors=n_sdtor,
-            purecalls=n_purecall,
-            stubs=n_stub_missing,
-            missing_real=n_real_missing,
-            symbol_mismatch=n_symbol_mismatch,
-            missing_real_items=tuple(missing_real),
-            missing_stub_items=tuple(missing_stubs),
-            symbol_mismatch_items=tuple(symbol_mismatches),
-            dump_lines=tuple(dump_lines),
-        ))
+    totals = {
+        "slots": sum(len(report.entries) for report in reports),
+        "inherited": sum(report.inherited for report in reports),
+        "overrides": sum(report.overrides for report in reports),
+        "implemented": sum(report.implemented for report in reports),
+        "sdtors": sum(report.sdtors for report in reports),
+        "purecalls": sum(report.purecalls for report in reports),
+        "stubs": sum(report.stubs for report in reports),
+        "missing_real": sum(report.missing_real for report in reports),
+        "symbol_mismatch": sum(report.symbol_mismatch for report in reports),
+        "implementations_count": len(sources.implementations),
+    }
 
     known_addrs = {info.vtable_addr for info in classes.values()}
     unmatched = tuple(sorted(set(all_vtable_addrs) - known_addrs))
-    return tuple(reports), totals, unmatched
+    return reports, totals, unmatched
 
 
 def check_vtables(config: dict[str, Any], target: ProjectTarget, options: VtableOptions) -> VtableSummary:
