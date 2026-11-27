@@ -187,6 +187,25 @@ def encoded_address(name: str) -> int | None:
     return int(match.group(1), 16) if match else None
 
 
+# An address anywhere in a name, as a whole underscore-separated part:
+# g_Table_00402000, but also g_00402010_flags.
+EMBEDDED_ADDRESS_RE = re.compile(r"_([0-9A-Fa-f]{6,8})(?=$|_)")
+
+
+def embedded_address(name: str) -> int | None:
+    """The original address a declaration name carries, wherever it sits.
+
+    Looser than :func:`encoded_address`: the address may be followed by
+    more of the name. When several parts look like one, the last wins, so
+    an earlier run of hex digits in s_cfg_031568_dat_0046bdd0 (part of a
+    file name) is not taken for the address.
+    """
+    match = None
+    for match in EMBEDDED_ADDRESS_RE.finditer(name):
+        pass
+    return int(match.group(1), 16) if match else None
+
+
 PURECALL_SYMBOLS = frozenset({"_purecall", "__purecall"})
 
 

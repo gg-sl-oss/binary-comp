@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import struct
 from dataclasses import dataclass
+from typing import Callable
 
 from binary_comp.core.mapfile import parse_encoded_address_map
+from binary_comp.core.symbols import embedded_address, encoded_address
 from binary_comp.core.pe import EXECUTABLE_FLAG, READABLE_FLAG, PEImage
 from binary_comp.core.image import load_image
 from binary_comp.core.le import LEImage
@@ -106,6 +108,10 @@ def load_data_globals(
     extra_type_sizes: dict[str, int] | None = None,
     constants: dict[str, int] | None = None,
     unknown_element_size: int | None = DEFAULT_UNKNOWN_ELEMENT_SIZE,
+    # How a declaration's name gives its address. PE globals files have
+    # always allowed it mid-name (g_00402010_flags); LE images and
+    # directories pass encoded_address, which needs it at the end.
+    name_address: Callable[[str], int | None] = embedded_address,
 ) -> list[GlobalDecl]:
     """The addressed globals in ``globals_path`` with their sizes, by address.
 
@@ -117,7 +123,8 @@ def load_data_globals(
     """
     types = globals_types({"type_sizes": extra_type_sizes or {}})
     constants = {"NULL": 0, **(constants or {})}
-    decls = sorted(parse_globals_source(globals_path), key=lambda decl: decl.address)
+    decls = sorted(parse_globals_source(globals_path, name_address=name_address),
+                   key=lambda decl: decl.address)
     for decl in decls:
         size = infer_size(decl, constants, None, types=types)
         if size is None and unknown_element_size is not None:
@@ -321,6 +328,7 @@ def compare_global_data(
         extra_type_sizes,
         constants,
         unknown_element_size=None if strict_sizes else DEFAULT_UNKNOWN_ELEMENT_SIZE,
+        name_address=encoded_address if strict_sizes else embedded_address,
     )
     exact, by_address = rebuilt_symbol_indexes(
         map_path, globals_list, rebuilt.segment_bases() if isinstance(rebuilt, LEImage) else None)

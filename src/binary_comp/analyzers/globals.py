@@ -6,7 +6,7 @@ import re
 import struct
 from bisect import bisect_right
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
     from capstone import Cs, CS_ARCH_X86, CS_MODE_32
@@ -281,8 +281,9 @@ def address_from_comments(text: str) -> Optional[int]:
     return None
 
 
-def address_for_declaration(name: str, leading: str, statement: str, trailing: str) -> Optional[int]:
-    address = encoded_address(name)
+def address_for_declaration(name: str, leading: str, statement: str, trailing: str,
+                            name_address: Callable[[str], Optional[int]] = encoded_address) -> Optional[int]:
+    address = name_address(name)
     if address is not None:
         return address
     # The declaration's own annotation outranks a preceding module comment.
@@ -489,14 +490,15 @@ def trailing_comments_after(source: bytes, end: int) -> str:
 
 def parse_globals_file(path: str,
                        require_extern: bool,
-                       address_warnings: Optional[List[AddressWarning]] = None) -> List[GlobalDecl]:
+                       address_warnings: Optional[List[AddressWarning]] = None,
+                       name_address: Callable[[str], Optional[int]] = encoded_address) -> List[GlobalDecl]:
     if not path or not os.path.exists(path):
         return []
     if os.path.isdir(path):
         suffixes = (".h", ".hh", ".hpp", ".hxx") if require_extern else (".c", ".cc", ".cpp", ".cxx")
         result: List[GlobalDecl] = []
         for file_path in iter_source_files([path], suffixes, ignore_case=True):
-            result.extend(parse_globals_file(file_path, require_extern, address_warnings))
+            result.extend(parse_globals_file(file_path, require_extern, address_warnings, name_address))
         return result
     with open(path, "rb") as f:
         source = f.read()
@@ -524,7 +526,7 @@ def parse_globals_file(path: str,
         statement = node_text(source, node).strip()
         leading = leading_comments_before(source, node.start_byte)
         trailing = trailing_comments_after(source, node.end_byte)
-        address = address_for_declaration(name, leading, statement, trailing)
+        address = address_for_declaration(name, leading, statement, trailing, name_address)
         if address is None:
             if address_warnings is not None:
                 context = "\n".join([leading, statement, trailing])
@@ -552,8 +554,15 @@ def parse_globals_file(path: str,
 
 
 def parse_globals_source(path: str,
-                         address_warnings: Optional[List[AddressWarning]] = None) -> List[GlobalDecl]:
-    return parse_globals_file(path, require_extern=False, address_warnings=address_warnings)
+                         address_warnings: Optional[List[AddressWarning]] = None,
+                         name_address: Callable[[str], Optional[int]] = encoded_address) -> List[GlobalDecl]:
+    """Addressed global definitions in ``path`` (a file or a directory).
+
+    ``name_address`` reads an address from a declaration's name; comments
+    are consulted when it finds none.
+    """
+    return parse_globals_file(path, require_extern=False, address_warnings=address_warnings,
+                              name_address=name_address)
 
 
 def parse_globals_header(path: str,

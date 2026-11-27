@@ -615,6 +615,31 @@ def test_parse_global_declarations_use_trailing_address_run(tmp_path):
     assert [item.address for item in globals_list] == [0x402040, 0x402050]
 
 
+def test_load_data_globals_reads_addresses_inside_names(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
+    from binary_comp.core.symbols import encoded_address
+
+    globals_path = tmp_path / "globals.cpp"
+    globals_path.write_text(
+        "int g_Count_00402000 = 1;\n"
+        "int g_00402010_flags = 2;\n"
+        "char s_cfg_031568_dat = 3;\n"
+        "int g_Plain = 4;\n",
+        encoding="utf-8",
+    )
+
+    # A PE globals file has always allowed the address mid-name; the last
+    # address-like part wins.
+    found = {decl.name: decl.address for decl in load_data_globals(str(globals_path))}
+    assert found == {"g_Count_00402000": 0x402000, "g_00402010_flags": 0x402010,
+                     "s_cfg_031568_dat": 0x031568}
+
+    # LE images and directories need the address at the end of the name.
+    strict = load_data_globals(str(globals_path), unknown_element_size=None, name_address=encoded_address)
+    assert [decl.name for decl in strict] == ["g_Count_00402000"]
+
+
 def test_load_data_globals_sizes(tmp_path):
     pytest.importorskip("tree_sitter")
     pytest.importorskip("tree_sitter_cpp")
