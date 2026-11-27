@@ -612,8 +612,12 @@ The script writes:
 FUN_XXXXXXXX.disassembled.txt  # Ghidra-style assembly consumed by compare/report/order/calls
 FUN_XXXXXXXX.decompiled.txt    # optional decompiler text used by call checks
 globals.h                      # conservative global inventory helper
-strings.txt                    # string inventory helper
+strings.txt                    # string inventory for people; no command reads it
 ```
+
+[`docs/export-format.md`](docs/export-format.md) specifies these files: the
+header, label and instruction-line syntax, and which command reads which part.
+Follow it when writing exports with another tool.
 
 The exported directory can then be used directly by the normal commands:
 
@@ -642,6 +646,24 @@ curl -sS -X POST http://127.0.0.1:8089/run_ghidra_script \
 
 Direct calls are normalized to absolute targets, so `binary-comp calls` sees
 Ghidra exports and `binary-comp export-asm` output consistently.
+
+## Similarity scores
+
+Several commands print a percentage. They do not all measure the same thing,
+so the same function can score differently in `report`, `values` and `exe`.
+
+| Command | Score | How it is computed |
+| --- | --- | --- |
+| `compare`, `report`, `triage`, `order`, `omf-compare`, `tpu-compare` | Mnemonic similarity | (1 − edit distance ÷ longer length) × 100, where the edit distance is the Levenshtein distance between the two sequences of instruction mnemonics. Operands are ignored. `compare` and `report` drop rebuilt instructions that are not reachable from the function entry. When the rebuilt function cannot be found in the map or decoded, `report` scores the mnemonics of the compiler's `.asm` listing instead. `triage` and `order` show the `compare` score. `tpu-compare` reports 100% when the masked bytes match. |
+| `values` | Aligned mnemonics | 100 × (length of the longest common subsequence of the mnemonic sequences) ÷ longer length. Nothing is trimmed. |
+| `report --bytes` | Byte status | Not a percentage: `EXACT`, `BYTES n/m` (n of m instructions differ once relocated fields and branch displacements are masked) or `SIZE ±n` (rebuilt minus original size, in bytes). |
+| `exe --functions` | `Raw%` | Bytes equal at the same offset over the shorter of the two functions, with nothing masked. |
+
+Edit distance charges a swap of two instructions twice, while a common
+subsequence charges it once. So reordered code scores lower in `report` than
+in `values`: for `a b c d` against `b a c d`, `report` gives 50% and `values`
+gives 75%. `triage` uses its own alignment of normalised instruction text only
+to classify differences, not to score them.
 
 ## Development
 

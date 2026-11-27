@@ -2,8 +2,8 @@
 
 Mnemonic similarity treats the EH prologue/epilogue as ordinary instructions, so
 a function can score "well" while unwinding the wrong set of objects (a member
-typed ``SlimeDim`` that should be a plain pair, a missing/spurious frame, an
-extra ``try`` block). This analyzer parses each side's ``FuncInfo`` and reports
+whose type has a destructor where the original used a plain struct, a
+missing/spurious frame, an extra ``try`` block). This analyzer parses each side's ``FuncInfo`` and reports
 those structural differences directly.
 """
 
@@ -185,7 +185,7 @@ def diff_eh(original: EHInfo, rebuilt: EHInfo, *, strict: bool = False) -> list[
             warnings.append(SehWarning(
                 "warn",
                 f"rebuilt destructs EXTRA member object at {offset} — likely typed with a "
-                f"destructor (SlimeDim/Rect) where the original used a dtor-less type",
+                f"destructor where the original used a dtor-less type",
             ))
         elif orig_members[offset] > reb_members[offset]:
             if reb_active_members[offset] == orig_active_members[offset]:

@@ -14,7 +14,9 @@ Ghidra also writes ``FUN_XXXXXXXX.decompiled.txt`` with the same header.
 
 These files are used as a function-boundary and name inventory only.
 Operand-level semantics must come from disassembling the binary itself.
-Change the format here and in the Java script together.
+``docs/export-format.md`` is the full contract, including the operand text
+that ``calls``, ``global-access``, ``globals`` and ``order`` parse.  Change the
+format here, in the Java script and in that document together.
 """
 
 from __future__ import annotations

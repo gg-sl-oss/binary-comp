@@ -107,8 +107,8 @@ public class ExportToCompile extends GhidraScript {
         return askDirectory("Choose binary-comp export directory", "Export");
     }
 
-    // The file format is documented in src/binary_comp/core/ghidra.py, which
-    // reads it; change both together.
+    // The file format is specified in docs/export-format.md and read by
+    // src/binary_comp/core/ghidra.py; change all three together.
     private void writeDisassembly(File outputDir, Listing listing, Function function) throws IOException {
         File outFile = new File(outputDir, fileStem(function) + ".disassembled.txt");
         try (BufferedWriter writer = utf8Writer(outFile)) {

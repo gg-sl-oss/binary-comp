@@ -142,7 +142,7 @@ def map_source_groups(
         for group in groups_by_source[source_path]:
             hit = None
             # Overloads are parsed with a parameter signature in the name
-            # (e.g. "Foo::Bar(SpriteAction*)"). Match the map entry whose
+            # (e.g. "Foo::Bar(Event*)"). Match the map entry whose
             # demangled signature is identical, so the greedy name-only fallback
             # below never pairs an overload's source with the wrong rebuilt entry.
             if "(" in group.name:
