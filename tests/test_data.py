@@ -642,3 +642,27 @@ def test_load_data_globals_sizes(tmp_path):
     }
     with pytest.raises(ValueError, match="unknown size of global g_DirectDraw_00402030"):
         load_data_globals(str(globals_path), constants={"COUNT": 5}, unknown_element_size=None)
+
+
+def test_load_data_globals_accepts_globals_larger_than_64k(tmp_path):
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_cpp")
+    globals_path = tmp_path / "globals.cpp"
+    globals_path.write_text(
+        "unsigned char g_Big_00402000[0x20000];\n"
+        "int g_Grid_00422000[256][128];\n",
+        encoding="utf-8",
+    )
+
+    # Declared sizes are used as they are, whether unknown types are
+    # tolerated (PE files) or not (LE images and directories).
+    for unknown_element_size in (4, None):
+        globals_list = load_data_globals(str(globals_path), unknown_element_size=unknown_element_size)
+        assert {decl.name: decl.size for decl in globals_list} == {
+            "g_Big_00402000": 0x20000,
+            "g_Grid_00422000": 0x20000,
+        }
+
+    # An element type of unknown size is guessed at, however many elements.
+    globals_path.write_text("LPTHING g_Things_00402000[0x8000];\n", encoding="utf-8")
+    assert [decl.size for decl in load_data_globals(str(globals_path))] == [0x20000]
