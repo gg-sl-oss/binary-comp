@@ -28,6 +28,7 @@ from binary_comp.analyzers.calls import (
 from binary_comp.analyzers.values import (
     CheckResult,
     CompareContext,
+    ValueWarning,
     ValuesOptions,
     ValuesSummary,
     check_values,
@@ -773,8 +774,8 @@ def test_value_summary_includes_mismatch_breakdown():
         original_count=4,
         rebuilt_count=4,
         warnings=(
-            ("imm", 1, 2, instr, instr),
-            ("string", "left", "right", instr, instr),
+            ValueWarning("imm", 1, 2, instr, instr),
+            ValueWarning("string", "left", "right", instr, instr),
         ),
     )
     result_b = CheckResult(
@@ -783,7 +784,7 @@ def test_value_summary_includes_mismatch_breakdown():
         similarity=95.0,
         original_count=4,
         rebuilt_count=4,
-        warnings=(("offset", 0x10, 0x20, instr, instr),),
+        warnings=(ValueWarning("offset", 0x10, 0x20, instr, instr),),
     )
     summary = ValuesSummary(
         functions_checked=2,
@@ -837,7 +838,7 @@ def test_stack_local_offsets_are_opt_in():
 
     warnings = compare_instruction_pair(compiled, original, None, None, 0, 0, stack_context)
     assert len(warnings) == 1
-    assert warnings[0][0] == "offset"
+    assert warnings[0].kind == "offset"
 
 
 def test_msvc_eh_state_stack_slot_is_not_a_value_mismatch():
@@ -880,7 +881,7 @@ def test_msvc_eh_state_stack_slot_is_not_a_value_mismatch():
         context,
     )
     assert len(warnings) == 1
-    assert warnings[0][0] == "imm"
+    assert warnings[0].kind == "imm"
 
 
 def test_value_offsets_compare_effective_alias_after_pointer_increment():
@@ -999,7 +1000,7 @@ def test_value_immediates_compare_effective_stack_pointer_alias():
         context,
     )
     assert len(warnings) == 1
-    assert warnings[0][0] == "imm"
+    assert warnings[0].kind == "imm"
 
 
 def test_chunk_ending_in_a_noreturn_call_counts_as_a_body(tmp_path):

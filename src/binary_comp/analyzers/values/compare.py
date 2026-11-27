@@ -19,7 +19,7 @@ from binary_comp.analyzers.values.dataflow import (
     nearby_memory_displacements,
     stack_argument_origin_at,
 )
-from binary_comp.analyzers.values.model import CompareContext
+from binary_comp.analyzers.values.model import CompareContext, ValueWarning
 from binary_comp.analyzers.values.operands import (
     comparable_lhs,
     comparable_operands,
@@ -111,7 +111,7 @@ def report_cmp_branch_condition_mismatch(
     ci: int,
     oi: int,
     context: CompareContext,
-) -> tuple | None:
+) -> ValueWarning | None:
     if "immediates" not in context.enabled_kinds:
         return None
 
@@ -134,7 +134,7 @@ def report_cmp_branch_condition_mismatch(
         compiled_instrs, original_instrs, ci + 1, oi + 1, context.policy
     ):
         return None
-    return ("branch", c_next.mnemonic, o_next.mnemonic, c_next, o_next)
+    return ValueWarning("branch", c_next.mnemonic, o_next.mnemonic, c_next, o_next)
 
 
 def report_stack_argument_origin_mismatch(
@@ -143,7 +143,7 @@ def report_stack_argument_origin_mismatch(
     ci: int,
     oi: int,
     context: CompareContext,
-) -> tuple | None:
+) -> ValueWarning | None:
     if "offsets" not in context.enabled_kinds:
         return None
 
@@ -174,7 +174,7 @@ def report_stack_argument_origin_mismatch(
     o_origin = stack_argument_origin_at(original_instrs, oi, o_op.reg)
     if c_origin is None or o_origin is None or c_origin == o_origin:
         return None
-    return ("arg", c_origin, o_origin, compiled, original)
+    return ValueWarning("arg", c_origin, o_origin, compiled, original)
 
 
 def report_string_mismatch(
@@ -235,7 +235,7 @@ def report_string_mismatch(
     if relocated_immediate(compiled, context.compiled_relocated) or \
             relocated_immediate(original, context.original_relocated):
         return None
-    return ("string", c_str, o_str, compiled, original)
+    return ValueWarning("string", c_str, o_str, compiled, original)
 
 
 def compare_instruction_pair(
@@ -246,10 +246,10 @@ def compare_instruction_pair(
     ci: int,
     oi: int,
     context: CompareContext,
-) -> list[tuple]:
+) -> list[ValueWarning]:
     compiled = compiled_instrs[ci]
     original = original_instrs[oi]
-    warnings: list[tuple] = []
+    warnings: list[ValueWarning] = []
 
     if compiled.mnemonic != original.mnemonic:
         return warnings
@@ -414,7 +414,7 @@ def compare_instruction_pair(
         if relocated_immediate(compiled, context.compiled_relocated) or \
                 relocated_immediate(original, context.original_relocated):
             continue
-        warnings.append(("imm", c_op.imm, o_op.imm, compiled, original))
+        warnings.append(ValueWarning("imm", c_op.imm, o_op.imm, compiled, original))
 
     c_mems = dict(memory_operands(compiled))
     o_mems = dict(memory_operands(original))
@@ -496,6 +496,6 @@ def compare_instruction_pair(
             if relocated_displacement(compiled, context.compiled_relocated) or \
                     relocated_displacement(original, context.original_relocated):
                 continue
-            warnings.append(("offset", c_op.disp, o_op.disp, compiled, original))
+            warnings.append(ValueWarning("offset", c_op.disp, o_op.disp, compiled, original))
 
     return warnings

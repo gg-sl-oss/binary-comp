@@ -20,12 +20,19 @@ origins.  The modules are layered, each importing only from those above it:
 """
 
 from binary_comp.analyzers.values.check import check_values
-from binary_comp.analyzers.values.model import CheckResult, CompareContext, ValuesOptions, ValuesSummary
+from binary_comp.analyzers.values.model import (
+    CheckResult,
+    CompareContext,
+    ValueWarning,
+    ValuesOptions,
+    ValuesSummary,
+)
 from binary_comp.analyzers.values.report import format_summary
 
 __all__ = [
     "CheckResult",
     "CompareContext",
+    "ValueWarning",
     "ValuesOptions",
     "ValuesSummary",
     "check_values",

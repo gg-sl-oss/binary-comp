@@ -1296,7 +1296,7 @@ def test_cmp_same_immediate_reports_adjacent_branch_condition_mismatch():
     warnings = compare_instruction_pair(compiled, original, NoStringsImage(), NoStringsImage(), 0, 0, context)
 
     assert len(warnings) == 1
-    assert warnings[0][0] == "branch"
+    assert warnings[0].kind == "branch"
     assert warnings[0][1:3] == ("jnl", "jnle")
 
 

@@ -4,63 +4,39 @@ from __future__ import annotations
 
 import os
 
-from binary_comp.analyzers.values.model import ValuesSummary
+from binary_comp.analyzers.values.model import WARNING_LABELS, ValueWarning, ValuesSummary
 
 
-def format_warning(warning: tuple) -> str:
+def format_warning(warning: ValueWarning) -> str:
     kind, compiled_value, original_value, compiled, original = warning
     if kind == "string":
-        return (
-            f"    STRING compiled {compiled_value!r} vs original {original_value!r}: "
-            f"0x{compiled.address:08X} {compiled.raw}  |  "
-            f"0x{original.address:08X} {original.raw}"
-        )
-    if kind == "imm":
-        return (
-            f"    IMM {compiled_value} vs {original_value}: "
-            f"0x{compiled.address:08X} {compiled.raw}  |  "
-            f"0x{original.address:08X} {original.raw}"
-        )
-    if kind == "offset":
-        return (
-            f"    OFFSET 0x{compiled_value & 0xFFFFFFFF:X} vs 0x{original_value & 0xFFFFFFFF:X}: "
-            f"0x{compiled.address:08X} {compiled.raw}  |  "
-            f"0x{original.address:08X} {original.raw}"
-        )
-    if kind == "branch":
-        return (
-            f"    BRANCH compiled {compiled_value} vs original {original_value}: "
-            f"0x{compiled.address:08X} {compiled.raw}  |  "
-            f"0x{original.address:08X} {original.raw}"
-        )
-    if kind == "arg":
-        return (
-            f"    ARG STACK+0x{compiled_value:X} vs STACK+0x{original_value:X}: "
-            f"0x{compiled.address:08X} {compiled.raw}  |  "
-            f"0x{original.address:08X} {original.raw}"
-        )
-    return str(warning)
+        values = f"STRING compiled {compiled_value!r} vs original {original_value!r}"
+    elif kind == "imm":
+        values = f"IMM {compiled_value} vs {original_value}"
+    elif kind == "offset":
+        values = f"OFFSET 0x{compiled_value & 0xFFFFFFFF:X} vs 0x{original_value & 0xFFFFFFFF:X}"
+    elif kind == "branch":
+        values = f"BRANCH compiled {compiled_value} vs original {original_value}"
+    elif kind == "arg":
+        values = f"ARG STACK+0x{compiled_value:X} vs STACK+0x{original_value:X}"
+    else:
+        return str(warning)
+    return (
+        f"    {values}: "
+        f"0x{compiled.address:08X} {compiled.raw}  |  "
+        f"0x{original.address:08X} {original.raw}"
+    )
 
 
-def warning_kind_counts(warnings: tuple) -> dict[str, int]:
-    counts = {"imm": 0, "string": 0, "offset": 0, "branch": 0, "arg": 0}
+def warning_kind_counts(warnings: tuple[ValueWarning, ...]) -> dict[str, int]:
+    counts = dict.fromkeys(WARNING_LABELS, 0)
     for warning in warnings:
-        if not warning:
-            continue
-        kind = warning[0]
-        counts[kind] = counts.get(kind, 0) + 1
+        counts[warning.kind] = counts.get(warning.kind, 0) + 1
     return counts
 
 
 def format_kind_counts(counts: dict[str, int]) -> str:
-    labels = (
-        ("imm", "IMM"),
-        ("string", "STRING"),
-        ("offset", "OFFSET"),
-        ("branch", "BRANCH"),
-        ("arg", "ARG"),
-    )
-    parts = [f"{label} {counts[kind]}" for kind, label in labels if counts.get(kind, 0)]
+    parts = [f"{label} {counts[kind]}" for kind, label in WARNING_LABELS.items() if counts.get(kind, 0)]
     return ", ".join(parts) if parts else "none"
 
 

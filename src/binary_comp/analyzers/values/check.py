@@ -20,6 +20,7 @@ from binary_comp.analyzers.values.disassembly import disassemble, load_original_
 from binary_comp.analyzers.values.model import (
     CheckResult,
     CompareContext,
+    ValueWarning,
     ValuesOptions,
     ValuesSummary,
 )
@@ -53,7 +54,7 @@ def check_candidate(
     compiled_image: PEImage,
     original_image: PEImage,
     context: CompareContext,
-) -> tuple[float, tuple]:
+) -> tuple[float, tuple[ValueWarning, ...]]:
     c_mnemonics = [instr.mnemonic for instr in compiled_instrs]
     o_mnemonics = [instr.mnemonic for instr in original_instrs]
     if not c_mnemonics or not o_mnemonics:
@@ -71,7 +72,7 @@ def check_candidate(
 
     matches = matches_in_aligned_runs(matches)
 
-    warnings: list[tuple] = []
+    warnings: list[ValueWarning] = []
     for ci, oi in matches:
         warnings.extend(compare_instruction_pair(
             compiled_instrs,

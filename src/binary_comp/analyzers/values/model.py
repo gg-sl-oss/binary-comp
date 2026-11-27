@@ -2,9 +2,38 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import NamedTuple
+
+from binary_comp.core.disasm import Instruction
 from binary_comp.policy import VerifierPolicy
 from binary_comp.source.functions import FunctionGroup
-from dataclasses import dataclass, field
+
+# Report label for each warning kind, in report order.
+WARNING_LABELS: dict[str, str] = {
+    "imm": "IMM",
+    "string": "STRING",
+    "offset": "OFFSET",
+    "branch": "BRANCH",
+    "arg": "ARG",
+}
+
+
+class ValueWarning(NamedTuple):
+    """One value that differs between a rebuilt and an original instruction.
+
+    ``kind`` is a key of ``WARNING_LABELS``.  The two values are what each side
+    has: an immediate or displacement for ``imm`` and ``offset``, the decoded
+    literal (or None) for ``string``, the conditional-branch mnemonic for
+    ``branch`` and the stack offset an argument was loaded from for ``arg``.
+    ``compiled`` and ``original`` are the instructions the values sit on.
+    """
+
+    kind: str
+    compiled_value: int | str | None
+    original_value: int | str | None
+    compiled: Instruction
+    original: Instruction
 
 
 @dataclass(frozen=True)
@@ -14,7 +43,7 @@ class CheckResult:
     similarity: float
     original_count: int
     rebuilt_count: int
-    warnings: tuple
+    warnings: tuple[ValueWarning, ...]
 
 
 @dataclass(frozen=True)
