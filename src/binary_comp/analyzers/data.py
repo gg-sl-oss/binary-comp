@@ -97,7 +97,6 @@ def format_bytes(data: bytes | None, max_bytes: int = 32) -> str:
     return f"{prefix} ... ({len(data)} bytes)"
 
 
-MAX_GLOBAL_SIZE = 0x10000
 DEFAULT_UNKNOWN_ELEMENT_SIZE = 4
 
 
@@ -114,6 +113,9 @@ def load_data_globals(
     ``unknown_element_size`` bytes (pointer-sized by default, which is right
     for the many pointer typedefs). With None it is an error instead, so the
     project has to configure ``globals.type_sizes``.
+
+    There is no upper bound: large buffers and tables are common globals,
+    and one of them must not stop the whole comparison.
     """
     types = globals_types({"type_sizes": extra_type_sizes or {}})
     constants = {"NULL": 0, **(constants or {})}
@@ -122,7 +124,7 @@ def load_data_globals(
         size = infer_size(decl, constants, None, types=types)
         if size is None and unknown_element_size is not None:
             size = _lenient_size(decl, constants, types, unknown_element_size)
-        if size is None or size <= 0 or size > MAX_GLOBAL_SIZE:
+        if size is None or size <= 0:
             raise ValueError(f"unknown size of global {decl.name}; configure globals.type_sizes")
         decl.size = size
     return decls
