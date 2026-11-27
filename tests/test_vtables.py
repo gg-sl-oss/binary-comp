@@ -6,6 +6,7 @@ import struct
 import pytest
 
 import binary_comp.analyzers.vtables as vtable_analyzer
+from binary_comp.analyzers.vtable_records import ClassInfo
 from binary_comp.analyzers.vtables import VtableOptions, check_vtables, parse_header_metadata
 from binary_comp.config import load_project_target
 
@@ -184,7 +185,7 @@ public:
         encoding="utf-8",
     )
 
-    _, _, _, explicit_vtables, _ = parse_header_metadata((str(src),), None)
+    explicit_vtables = parse_header_metadata((str(src),), None).explicit_vtables
 
     assert explicit_vtables["Trailing"] == DATA_VA
 
@@ -202,7 +203,7 @@ public:
         encoding="utf-8",
     )
 
-    _, _, _, explicit_vtables, _ = parse_header_metadata((str(src),), None)
+    explicit_vtables = parse_header_metadata((str(src),), None).explicit_vtables
 
     assert explicit_vtables["Opening"] == DATA_VA
 
@@ -226,7 +227,8 @@ public:
         encoding="utf-8",
     )
 
-    _, _, _, explicit_vtables, constructors = parse_header_metadata((str(src),), None)
+    headers = parse_header_metadata((str(src),), None)
+    explicit_vtables, constructors = headers.explicit_vtables, headers.constructors
 
     assert explicit_vtables["First"] == DATA_VA
     assert constructors["First"] == TEXT_VA
@@ -236,16 +238,8 @@ public:
 
 def test_constructor_hierarchy_skips_negative_result_without_known_parent_constructor(monkeypatch):
     classes = {
-        "Base": {
-            "vtable_addr": DATA_VA,
-            "parent": None,
-            "constructor": None,
-        },
-        "Child": {
-            "vtable_addr": DATA_VA + 4,
-            "parent": "Base",
-            "constructor": TEXT_VA,
-        },
+        "Base": ClassInfo(vtable_addr=DATA_VA),
+        "Child": ClassInfo(vtable_addr=DATA_VA + 4, parent="Base", constructor=TEXT_VA),
     }
 
     monkeypatch.setattr(
