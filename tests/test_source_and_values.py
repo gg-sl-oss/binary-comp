@@ -31,10 +31,10 @@ from binary_comp.analyzers.values import (
     ValuesOptions,
     ValuesSummary,
     check_values,
-    compare_instruction_pair,
     format_summary,
-    same_effective_lea_displacement,
 )
+from binary_comp.analyzers.values.compare import compare_instruction_pair
+from binary_comp.analyzers.values.suppressors import same_effective_lea_displacement
 from binary_comp.policy import load_policy
 from binary_comp.config import BuildConfig, ProjectTarget, load_project_target
 from binary_comp.core.disasm import Instruction, Operand

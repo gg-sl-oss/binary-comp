@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-from binary_comp.analyzers.values import (
-    CompareContext,
-    comparable_operands,
-    compare_instruction_pair,
-    contiguous_tail_fragment_start,
+from binary_comp.analyzers.values import CompareContext
+from binary_comp.analyzers.values.align import value_aware_align
+from binary_comp.analyzers.values.calls import following_call_signature
+from binary_comp.analyzers.values.compare import compare_instruction_pair
+from binary_comp.analyzers.values.dataflow import sign_step_outputs, stack_argument_origin_at
+from binary_comp.analyzers.values.disassembly import contiguous_tail_fragment_start
+from binary_comp.analyzers.values.operands import comparable_operands, is_stack_probe_size_load
+from binary_comp.analyzers.values.suppressors import (
     equivalent_reordered_push_values,
-    equivalent_reordered_x87_status_masks,
     equivalent_structurally_reordered_displacements,
     equivalent_structurally_reordered_immediates,
-    following_call_signature,
-    is_stack_probe_size_load,
     same_affine_memory_address,
-    sign_step_outputs,
-    stack_argument_origin_at,
-    value_aware_align,
 )
+from binary_comp.analyzers.values.x87 import equivalent_reordered_x87_status_masks
 from binary_comp.policy import load_policy
 from binary_comp.core.disasm import Instruction, Operand
 

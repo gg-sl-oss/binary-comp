@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from binary_comp.analyzers.values import (
+from binary_comp.analyzers.values.disassembly import (
     disassemble as disassemble_values,
     leading_successor_switch_table_start,
 )
