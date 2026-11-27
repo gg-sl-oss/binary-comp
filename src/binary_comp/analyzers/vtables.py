@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from binary_comp.analyzers.rebuilt_vtables import (
@@ -13,6 +13,7 @@ from binary_comp.analyzers.rebuilt_vtables import (
     compare_rebuilt_vtables,
     format_rebuilt_vtable_summary,
 )
+from binary_comp.analyzers.vtable_records import ClassInfo, ClassMethod, SourceSymbol
 from binary_comp.config import ConfigError, ProjectTarget, parse_int
 from binary_comp.core.disasm import Instruction, disassemble_x86, unsigned32
 from binary_comp.core.ghidra import function_starts_from_export_dir
@@ -88,12 +89,23 @@ class ParentVtableCandidate:
 
 
 @dataclass(frozen=True)
+class ConstructorParentWarning:
+    """A constructor that shows no sign of initialising its declared parent."""
+
+    class_name: str
+    parent_name: str
+    constructor: int
+    parent_constructor: int | None
+    parent_vtable: int | None
+
+
+@dataclass(frozen=True)
 class HeaderMetadata:
     """What the class declarations in the headers say."""
 
     hierarchy: dict[str, str]
     class_header: dict[str, str]
-    class_methods: dict[str, list[dict[str, Any]]]
+    class_methods: dict[str, list[ClassMethod]]
     explicit_vtables: dict[str, int]
     constructors: dict[str, int]
     # Every ``vtable 0x...`` address noted in any header comment, not only the
@@ -106,7 +118,7 @@ class VtableSources:
     """Everything the check reads from the source tree, parsed once."""
 
     headers: HeaderMetadata
-    function_symbols: dict[int, list[dict[str, Any]]]
+    function_symbols: dict[int, list[SourceSymbol]]
     implementations: dict[int, list[tuple[str, int]]]
 
 
@@ -127,7 +139,7 @@ class ClassReport:
     symbol_mismatch: int
     missing_real_items: tuple[tuple[int, int, str, str], ...]
     missing_stub_items: tuple[tuple[int, int, str, str, str], ...]
-    symbol_mismatch_items: tuple[tuple[int, int, dict[str, Any], tuple[dict[str, Any], ...], str], ...]
+    symbol_mismatch_items: tuple[tuple[int, int, ClassMethod, tuple[SourceSymbol, ...], str], ...]
     dump_lines: tuple[str, ...]
 
 
@@ -137,11 +149,11 @@ class VtableSummary:
     code_range: tuple[int, int]
     rdata_range: tuple[int, int]
     vtable_addresses: tuple[int, ...]
-    classes: dict[str, dict[str, Any]]
+    classes: dict[str, ClassInfo]
     invalid_parents: tuple[tuple[str, str], ...]
     parents_without_vtable_info: tuple[tuple[str, str], ...]
     parent_vtable_candidates: tuple[ParentVtableCandidate, ...]
-    constructor_parent_warnings: tuple[dict[str, Any], ...]
+    constructor_parent_warnings: tuple[ConstructorParentWarning, ...]
     constructor_parent_stats: dict[str, int]
     implementations_count: int
     reports: tuple[ClassReport, ...]
@@ -407,7 +419,7 @@ def method_name_from_declarator(source: bytes, function_declarator) -> str | Non
     return name
 
 
-def parse_class_method_node(source: bytes, member_node, class_name: str, basename: str) -> dict[str, Any] | None:
+def parse_class_method_node(source: bytes, member_node, class_name: str, basename: str) -> ClassMethod | None:
     function_declarator = find_function_declarator(member_node)
     if function_declarator is None:
         return None
@@ -421,16 +433,16 @@ def parse_class_method_node(source: bytes, member_node, class_name: str, basenam
     params = parameter_list_text(source, function_declarator)
     is_virtual = any(child.type == "virtual" for child in member_node.children)
     is_const = bool(re.search(r"\)\s*const\b", member_text))
-    return {
-        "class_name": class_name,
-        "method_name": method_name,
-        "signature_key": build_signature_key(method_name, params, is_const),
-        "is_virtual": is_virtual,
-        "slot_index": extract_slot_index(context),
-        "display_name": f"{class_name}::{method_name}",
-        "file": basename,
-        "line_number": member_node.start_point.row + 1,
-    }
+    return ClassMethod(
+        class_name=class_name,
+        method_name=method_name,
+        signature_key=build_signature_key(method_name, params, is_const),
+        is_virtual=is_virtual,
+        slot_index=extract_slot_index(context),
+        display_name=f"{class_name}::{method_name}",
+        file=basename,
+        line_number=member_node.start_point.row + 1,
+    )
 
 
 def iter_class_nodes(tree):
@@ -452,7 +464,7 @@ def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None) ->
 
     hierarchy: dict[str, str] = {}
     class_header: dict[str, str] = {}
-    class_methods: dict[str, list[dict[str, Any]]] = {}
+    class_methods: dict[str, list[ClassMethod]] = {}
     explicit_vtables: dict[str, int] = {}
     constructors: dict[str, int] = {}
     comment_vtable_addrs: set[int] = set()
@@ -509,16 +521,11 @@ def split_symbol(name: str) -> tuple[str | None, str]:
     return name.rsplit("::", 1)
 
 
-def find_source_function_symbols(source_dirs: tuple[str, ...], map_skip: str | None) -> dict[int, list[dict[str, Any]]]:
-    function_symbols: dict[int, list[dict[str, Any]]] = {}
+def find_source_function_symbols(source_dirs: tuple[str, ...], map_skip: str | None) -> dict[int, list[SourceSymbol]]:
+    function_symbols: dict[int, list[SourceSymbol]] = {}
 
     def record_symbol(address: int, class_name: str, method_name: str, basename: str, lineno: int) -> None:
-        info = {
-            "class_name": class_name,
-            "method_name": method_name,
-            "file": basename,
-            "line_number": lineno,
-        }
+        info = SourceSymbol(class_name, method_name, basename, lineno)
         function_symbols.setdefault(address, [])
         if info not in function_symbols[address]:
             function_symbols[address].append(info)
@@ -626,9 +633,9 @@ def find_vtable_addrs_from_capstone(
     return addrs
 
 
-def symbol_labels_for_function(function_symbols: dict[int, list[dict[str, Any]]], addr: int) -> tuple[str, ...]:
+def symbol_labels_for_function(function_symbols: dict[int, list[SourceSymbol]], addr: int) -> tuple[str, ...]:
     symbols = function_symbols.get(addr, [])
-    return tuple(f"{sym['class_name']}::{sym['method_name']}" for sym in symbols if sym.get("class_name"))
+    return tuple(sym.label for sym in symbols if sym.class_name)
 
 
 def collect_vtable_writes(
@@ -639,7 +646,7 @@ def collect_vtable_writes(
     rdata_min: int,
     rdata_max: int,
     policy: VtablePolicy,
-    function_symbols: dict[int, list[dict[str, Any]]],
+    function_symbols: dict[int, list[SourceSymbol]],
 ) -> dict[int, tuple[VtableWriteEvidence, ...]]:
     writes: dict[int, list[VtableWriteEvidence]] = {}
     for start in starts:
@@ -713,18 +720,12 @@ def selected_constructor_vtable(evidence: ConstructorEvidence | None) -> int | N
     return None
 
 
-def constructor_symbols(function_symbols: dict[int, list[dict[str, Any]]]) -> dict[int, dict[str, Any]]:
+def constructor_symbols(function_symbols: dict[int, list[SourceSymbol]]) -> dict[int, SourceSymbol]:
     result = {}
     for addr, infos in function_symbols.items():
-        ctor_infos = [
-            info for info in infos
-            if info["class_name"] and (
-                info["method_name"] == info["class_name"]
-            )
-        ]
-        if ctor_infos:
-            preferred = next((info for info in ctor_infos if info["method_name"] == info["class_name"]), ctor_infos[0])
-            result[addr] = preferred
+        ctor = next((info for info in infos if info.class_name and info.method_name == info.class_name), None)
+        if ctor is not None:
+            result[addr] = ctor
     return result
 
 
@@ -751,7 +752,7 @@ def find_parent_vtable_candidates(
     sources: VtableSources,
     image: PEImage,
     starts: list[int],
-    classes: dict[str, dict[str, Any]],
+    classes: dict[str, ClassInfo],
     parent_refs: tuple[tuple[str, str], ...],
     all_vtable_addrs: tuple[int, ...],
     code_start: int,
@@ -776,12 +777,12 @@ def find_parent_vtable_candidates(
         policy,
         function_symbols,
     )
-    known_addrs = {info["vtable_addr"] for info in classes.values()}
+    known_addrs = {info.vtable_addr for info in classes.values()}
     candidate_addrs = sorted((set(all_vtable_addrs) - known_addrs) & set(writes_by_vtable))
     if not candidate_addrs:
         return ()
 
-    expected_slots: dict[str, list[dict[str, Any] | None]] = {}
+    expected_slots: dict[str, list[ClassMethod | None]] = {}
     results = []
     for class_name, parent in parent_refs:
         parent_slots = build_expected_vtable_slots(parent, classes, class_methods, expected_slots, policy)
@@ -821,8 +822,8 @@ def parse_class_info(
     rdata_min: int,
     rdata_max: int,
     policy: VtablePolicy,
-) -> tuple[dict[str, dict[str, Any]], frozenset[str]]:
-    classes: dict[str, dict[str, Any]] = {}
+) -> tuple[dict[str, ClassInfo], frozenset[str]]:
+    classes: dict[str, ClassInfo] = {}
     headers = sources.headers
     hierarchy = headers.hierarchy
     class_header = headers.class_header
@@ -831,9 +832,9 @@ def parse_class_info(
     known_class_names = set(class_header)
     ctor_symbols = constructor_symbols(sources.function_symbols)
     ctor_by_class = {
-        info["class_name"]: addr
+        info.class_name: addr
         for addr, info in ctor_symbols.items()
-        if info["class_name"] not in constructors
+        if info.class_name not in constructors
     }
 
     for class_name in sorted(class_header):
@@ -850,53 +851,55 @@ def parse_class_info(
                 vtable_addr = chosen
 
         if vtable_addr:
-            classes[class_name] = {
-                "vtable_addr": vtable_addr,
-                "parent": hierarchy.get(class_name),
-                "header": class_header.get(class_name, "(unknown)"),
-                "constructor": ctor_addr,
-            }
+            classes[class_name] = ClassInfo(
+                vtable_addr=vtable_addr,
+                parent=hierarchy.get(class_name),
+                header=class_header.get(class_name, "(unknown)"),
+                constructor=ctor_addr,
+            )
 
     for item in policy.manual_classes:
         name = item["name"]
         known_class_names.add(name)
         if name not in classes:
-            classes[name] = {
-                "vtable_addr": parse_int(item["vtable_addr"], "vtables.manual_classes[].vtable_addr"),
-                "parent": item.get("parent"),
-                "header": item.get("header", "(unknown)"),
-                "constructor": parse_optional_int(item.get("constructor"), "vtables.manual_classes[].constructor"),
-            }
+            classes[name] = ClassInfo(
+                vtable_addr=parse_int(item["vtable_addr"], "vtables.manual_classes[].vtable_addr"),
+                parent=item.get("parent"),
+                header=item.get("header", "(unknown)"),
+                constructor=parse_optional_int(item.get("constructor"), "vtables.manual_classes[].constructor"),
+            )
 
     for item in policy.duplicate_class_drops:
         drop = item.get("drop")
         keep = item.get("keep")
         if drop in classes and keep in classes:
-            if not item.get("when_same_vtable") or classes[drop]["vtable_addr"] == classes[keep]["vtable_addr"]:
+            if not item.get("when_same_vtable") or classes[drop].vtable_addr == classes[keep].vtable_addr:
                 del classes[drop]
 
     for class_name, override in policy.class_overrides.items():
         if class_name in classes:
+            changes: dict[str, Any] = {}
             if "vtable_addr" in override:
-                classes[class_name]["vtable_addr"] = parse_int(override["vtable_addr"], f"vtables.class_overrides.{class_name}.vtable_addr")
+                changes["vtable_addr"] = parse_int(override["vtable_addr"], f"vtables.class_overrides.{class_name}.vtable_addr")
             if "parent" in override:
-                classes[class_name]["parent"] = override["parent"]
+                changes["parent"] = override["parent"]
             if "header" in override:
-                classes[class_name]["header"] = override["header"]
+                changes["header"] = override["header"]
+            classes[class_name] = replace(classes[class_name], **changes)
 
     known_class_names.update(policy.class_overrides)
     return classes, frozenset(known_class_names)
 
 
 def find_constructor_parent_warnings(
-    classes: dict[str, dict[str, Any]],
+    classes: dict[str, ClassInfo],
     image: PEImage,
     starts: list[int],
     rdata_min: int,
     rdata_max: int,
     policy: VtablePolicy,
     filter_class: str | None,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[ConstructorParentWarning], dict[str, int]]:
     warnings = []
     stats = {
         "checked": 0,
@@ -910,8 +913,8 @@ def find_constructor_parent_warnings(
         if filter_class and class_name != filter_class:
             continue
 
-        parent_name = info.get("parent")
-        ctor_addr = info.get("constructor")
+        parent_name = info.parent
+        ctor_addr = info.constructor
         if not parent_name:
             continue
         if not ctor_addr:
@@ -922,8 +925,8 @@ def find_constructor_parent_warnings(
         if not parent_info:
             continue
 
-        parent_ctor = parent_info.get("constructor")
-        parent_vtable = parent_info.get("vtable_addr")
+        parent_ctor = parent_info.constructor
+        parent_vtable = parent_info.vtable_addr
         if not parent_ctor and not parent_vtable:
             stats["missing_parent_evidence"] += 1
             continue
@@ -953,13 +956,13 @@ def find_constructor_parent_warnings(
             continue
 
         stats["checked"] += 1
-        warnings.append({
-            "class_name": class_name,
-            "parent_name": parent_name,
-            "constructor": ctor_addr,
-            "parent_constructor": parent_ctor,
-            "parent_vtable": parent_vtable,
-        })
+        warnings.append(ConstructorParentWarning(
+            class_name=class_name,
+            parent_name=parent_name,
+            constructor=ctor_addr,
+            parent_constructor=parent_ctor,
+            parent_vtable=parent_vtable,
+        ))
 
     return warnings, stats
 
@@ -1070,14 +1073,14 @@ def read_vtable_entries(image: PEImage, vtable_addr: int, code_start: int, code_
 
 def read_class_vtables(
     image: PEImage,
-    classes: dict[str, dict[str, Any]],
+    classes: dict[str, ClassInfo],
     all_vtable_addrs: tuple[int, ...],
     code_start: int,
     code_end: int,
 ) -> dict[str, tuple[int, ...]]:
     vtables: dict[str, tuple[int, ...]] = {}
     for class_name, info in classes.items():
-        addr = info["vtable_addr"]
+        addr = info.vtable_addr
         idx = all_vtable_addrs.index(addr) if addr in all_vtable_addrs else -1
         max_addr = all_vtable_addrs[idx + 1] if idx >= 0 and idx + 1 < len(all_vtable_addrs) else addr + 0x100
         vtables[class_name] = read_vtable_entries(image, addr, code_start, code_end, max_addr)
@@ -1086,24 +1089,25 @@ def read_class_vtables(
 
 def build_expected_vtable_slots(
     class_name: str,
-    classes: dict[str, dict[str, Any]],
-    class_methods: dict[str, list[dict[str, Any]]],
-    cache: dict[str, list[dict[str, Any] | None]],
+    classes: dict[str, ClassInfo],
+    class_methods: dict[str, list[ClassMethod]],
+    cache: dict[str, list[ClassMethod | None]],
     policy: VtablePolicy,
-) -> list[dict[str, Any] | None]:
+) -> list[ClassMethod | None]:
     if class_name in cache:
         return cache[class_name]
 
-    parent = classes.get(class_name, {}).get("parent")
+    info = classes.get(class_name)
+    parent = info.parent if info is not None else None
     slots = list(build_expected_vtable_slots(parent, classes, class_methods, cache, policy)) if parent else []
-    slot_index = {slot["signature_key"]: idx for idx, slot in enumerate(slots) if slot is not None}
+    slot_index = {slot.signature_key: idx for idx, slot in enumerate(slots) if slot is not None}
 
     for decl in class_methods.get(class_name, []):
-        method_name = decl["method_name"]
+        method_name = decl.method_name
         if method_name == class_name:
             continue
-        key = decl["signature_key"]
-        explicit_slot = decl.get("slot_index") if policy.use_explicit_slot_indexes else None
+        key = decl.signature_key
+        explicit_slot = decl.slot_index if policy.use_explicit_slot_indexes else None
         if explicit_slot is not None:
             while len(slots) <= explicit_slot:
                 slots.append(None)
@@ -1111,7 +1115,7 @@ def build_expected_vtable_slots(
             slot_index[key] = explicit_slot
         elif key in slot_index:
             slots[slot_index[key]] = decl
-        elif decl["is_virtual"]:
+        elif decl.is_virtual:
             slot_index[key] = len(slots)
             slots.append(decl)
 
@@ -1119,10 +1123,10 @@ def build_expected_vtable_slots(
     return slots
 
 
-def format_symbol_list(symbols: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> str:
+def format_symbol_list(symbols: tuple[SourceSymbol, ...] | list[SourceSymbol]) -> str:
     if not symbols:
         return "(unresolved)"
-    return ", ".join(f"{sym['class_name']}::{sym['method_name']}" for sym in symbols)
+    return ", ".join(sym.label for sym in symbols)
 
 
 def is_trivial_function_type(ftype: str) -> bool:
@@ -1132,7 +1136,7 @@ def is_trivial_function_type(ftype: str) -> bool:
 def build_class_reports(
     sources: VtableSources,
     image: PEImage,
-    classes: dict[str, dict[str, Any]],
+    classes: dict[str, ClassInfo],
     all_vtable_addrs: tuple[int, ...],
     code_start: int,
     code_end: int,
@@ -1144,7 +1148,7 @@ def build_class_reports(
     function_symbols = sources.function_symbols
     class_methods = sources.headers.class_methods
 
-    expected_slots: dict[str, list[dict[str, Any] | None]] = {}
+    expected_slots: dict[str, list[ClassMethod | None]] = {}
     for class_name in classes:
         build_expected_vtable_slots(class_name, classes, class_methods, expected_slots, policy)
 
@@ -1160,9 +1164,9 @@ def build_class_reports(
         if depth > 10:
             return ()
         info = classes.get(class_name)
-        if not info or not info.get("parent"):
+        if not info or not info.parent:
             return ()
-        parent = info["parent"]
+        parent = info.parent
         if parent in vtables:
             return vtables[parent]
         return get_parent_entries(parent, depth + 1)
@@ -1172,7 +1176,7 @@ def build_class_reports(
         cur = class_name
         while cur and cur in classes:
             chain.append(cur)
-            cur = classes[cur].get("parent")
+            cur = classes[cur].parent
         return chain
 
     def slot_names_for(class_name: str) -> dict[int, str]:
@@ -1182,13 +1186,13 @@ def build_class_reports(
                 return item["slots"]
         return {}
 
-    def matches_expected_symbol(class_name: str, slot_idx: int, expected: dict[str, Any] | None, symbols) -> bool:
+    def matches_expected_symbol(class_name: str, slot_idx: int, expected: ClassMethod | None, symbols) -> bool:
         if expected is None:
             return True
         aliases = policy.slot_symbol_aliases.get((class_name, slot_idx), set())
         for sym in symbols:
-            candidate = (sym["class_name"], sym["method_name"])
-            if candidate == (expected["class_name"], expected["method_name"]) or candidate in aliases:
+            candidate = (sym.class_name, sym.method_name)
+            if candidate == (expected.class_name, expected.method_name) or candidate in aliases:
                 return True
         return False
 
@@ -1208,7 +1212,7 @@ def build_class_reports(
 
     sorted_classes = sorted(
         [class_name for class_name in vtables if not options.filter_class or class_name == options.filter_class],
-        key=lambda class_name: classes[class_name]["vtable_addr"],
+        key=lambda class_name: classes[class_name].vtable_addr,
     )
 
     for class_name in sorted_classes:
@@ -1226,12 +1230,12 @@ def build_class_reports(
         def slot_label(slot_idx: int) -> str:
             expected = expected_for_slot(slot_idx)
             if expected is not None:
-                return expected["method_name"]
+                return expected.method_name
             return slot_names.get(slot_idx, "")
 
         def is_sdtor_slot(slot_idx: int) -> bool:
             expected = expected_for_slot(slot_idx)
-            if expected is not None and expected["signature_key"] == "__dtor__":
+            if expected is not None and expected.signature_key == "__dtor__":
                 return True
             return slot_idx in (0, 3)
 
@@ -1261,7 +1265,7 @@ def build_class_reports(
                 if (
                     slot_idx not in policy.skip_symbol_slots
                     and expected is not None
-                    and expected["signature_key"] != "__dtor__"
+                    and expected.signature_key != "__dtor__"
                     and not is_trivial_function_type(ftype)
                 ):
                     if not matches_expected_symbol(class_name, slot_idx, expected, symbols):
@@ -1287,7 +1291,7 @@ def build_class_reports(
                 missing_real.append((slot_idx, func_addr, ftype, label))
 
         if options.dump:
-            parent_str = info.get("parent") or "(root)"
+            parent_str = info.parent or "(root)"
             for idx, func_addr in enumerate(entries):
                 is_inherited = idx < len(parent_entries) and parent_entries[idx] == func_addr
                 is_impl = func_addr in implementations
@@ -1302,7 +1306,7 @@ def build_class_reports(
                     if (
                         idx not in policy.skip_symbol_slots
                         and expected is not None
-                        and expected["signature_key"] != "__dtor__"
+                        and expected.signature_key != "__dtor__"
                         and not is_trivial_function_type(ftype)
                     ):
                         matches = matches_expected_symbol(class_name, idx, expected, symbols)
@@ -1310,7 +1314,7 @@ def build_class_reports(
                         locs = implementations[func_addr]
                         status = f"OK <- {', '.join(f'{file}:{line}' for file, line in locs)}"
                     else:
-                        status = f"MISMATCH expected {expected['display_name']} got {format_symbol_list(symbols)}"
+                        status = f"MISMATCH expected {expected.display_name} got {format_symbol_list(symbols)}"
                 elif ftype == "purecall":
                     status = "purecall (declared `= 0`)"
                 elif is_sdtor_slot(idx):
@@ -1336,9 +1340,9 @@ def build_class_reports(
 
         reports.append(ClassReport(
             name=class_name,
-            vtable_addr=info["vtable_addr"],
-            parent=info.get("parent"),
-            header=info.get("header", "(unknown)"),
+            vtable_addr=info.vtable_addr,
+            parent=info.parent,
+            header=info.header,
             entries=entries,
             inherited=inherited,
             overrides=len(overrides),
@@ -1354,7 +1358,7 @@ def build_class_reports(
             dump_lines=tuple(dump_lines),
         ))
 
-    known_addrs = {info["vtable_addr"] for info in classes.values()}
+    known_addrs = {info.vtable_addr for info in classes.values()}
     unmatched = tuple(sorted(set(all_vtable_addrs) - known_addrs))
     return tuple(reports), totals, unmatched
 
@@ -1390,14 +1394,14 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
 
     classes, known_class_names = parse_class_info(sources, image, starts, rdata_min, rdata_max, policy)
     invalid_parents = tuple(sorted(
-        (class_name, info["parent"])
+        (class_name, info.parent)
         for class_name, info in classes.items()
-        if info.get("parent") and info["parent"] not in classes and info["parent"] not in known_class_names
+        if info.parent and info.parent not in classes and info.parent not in known_class_names
     ))
     parents_without_vtable_info = tuple(sorted(
-        (class_name, info["parent"])
+        (class_name, info.parent)
         for class_name, info in classes.items()
-        if info.get("parent") and info["parent"] not in classes and info["parent"] in known_class_names
+        if info.parent and info.parent not in classes and info.parent in known_class_names
     ))
     constructor_parent_warnings, constructor_parent_stats = find_constructor_parent_warnings(
         classes,
@@ -1521,13 +1525,13 @@ def format_vtable_summary(summary: VtableSummary, dump: bool = False) -> str:
     if summary.constructor_parent_warnings:
         lines.append("Constructor hierarchy warnings:")
         for item in summary.constructor_parent_warnings:
-            parent_vtable = item["parent_vtable"]
+            parent_vtable = item.parent_vtable
             parent_vtable_str = f"0x{parent_vtable:08X}" if parent_vtable else "(none)"
-            parent_ctor = item["parent_constructor"]
+            parent_ctor = item.parent_constructor
             parent_ctor_str = f"0x{parent_ctor:08X}" if parent_ctor else "(none)"
             lines.append(
-                f"  {item['class_name']} declares parent {item['parent_name']}, "
-                f"but ctor 0x{item['constructor']:08X} neither calls parent ctor "
+                f"  {item.class_name} declares parent {item.parent_name}, "
+                f"but ctor 0x{item.constructor:08X} neither calls parent ctor "
                 f"{parent_ctor_str} nor writes parent vtable {parent_vtable_str}"
             )
         lines.append("")
@@ -1573,7 +1577,7 @@ def format_vtable_summary(summary: VtableSummary, dump: bool = False) -> str:
             for slot_idx, func_addr, expected, symbols, label in report.symbol_mismatch_items:
                 lines.append(
                     f"    [{slot_idx:2d}] {label:<15} 0x{func_addr:08X}  "
-                    f"expected {expected['display_name']} got {format_symbol_list(symbols)}"
+                    f"expected {expected.display_name} got {format_symbol_list(symbols)}"
                 )
         lines.append("=" * 124)
 

@@ -21,8 +21,8 @@ import os
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any
 
+from binary_comp.analyzers.vtable_records import ClassInfo, SourceSymbol
 from binary_comp.config import ProjectTarget
 from binary_comp.core.mapfile import parse_msvc_map_symbols
 from binary_comp.core.pe import PEImage
@@ -99,22 +99,22 @@ def _read_entries(image: PEImage, va: int, code_start: int, code_end: int, cap: 
 
 
 def _source_addresses_by_symbol(
-    function_symbols: dict[int, list[dict[str, Any]]]
+    function_symbols: dict[int, list[SourceSymbol]]
 ) -> dict[tuple[str, str], set[int]]:
     addresses: dict[tuple[str, str], set[int]] = defaultdict(set)
     for address, symbols in function_symbols.items():
         for symbol in symbols:
-            addresses[(symbol["class_name"], symbol["method_name"])].add(address)
+            addresses[(symbol.class_name, symbol.method_name)].add(address)
     return addresses
 
 
-def _display_name(function_symbols: dict[int, list[dict[str, Any]]], address: int | None) -> str:
+def _display_name(function_symbols: dict[int, list[SourceSymbol]], address: int | None) -> str:
     if address is None:
         return UNKNOWN_NAME
     symbols = function_symbols.get(address)
     if not symbols:
         return UNKNOWN_NAME
-    return ", ".join(f"{sym['class_name']}::{sym['method_name']}" for sym in symbols)
+    return ", ".join(sym.label for sym in symbols)
 
 
 def read_rebuilt_vtables(
@@ -215,9 +215,9 @@ def _slot_matches(
 
 def compare_rebuilt_vtables(
     target: ProjectTarget,
-    classes: dict[str, dict[str, Any]],
+    classes: dict[str, ClassInfo],
     original_vtables: dict[str, tuple[int, ...]],
-    function_symbols: dict[int, list[dict[str, Any]]],
+    function_symbols: dict[int, list[SourceSymbol]],
     skip_classes: frozenset[str] = frozenset(),
     filter_class: str | None = None,
 ) -> RebuiltVtableSummary:
@@ -307,7 +307,7 @@ def compare_rebuilt_vtables(
 
         diffs.append(RebuiltClassDiff(
             class_name=class_name,
-            original_vtable=classes[class_name]["vtable_addr"],
+            original_vtable=classes[class_name].vtable_addr,
             rebuilt_vtable=rebuilt_va,
             original_len=len(original_entries),
             rebuilt_len=len(rebuilt_entries),

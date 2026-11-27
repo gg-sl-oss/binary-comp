@@ -11,6 +11,7 @@ from binary_comp.analyzers.rebuilt_vtables import (
     compare_rebuilt_vtables,
     read_rebuilt_vtables,
 )
+from binary_comp.analyzers.vtable_records import ClassInfo, SourceSymbol
 from binary_comp.config import ProjectTarget
 from binary_comp.core.symbols import msvc_method_symbol, msvc_vftable_class
 
@@ -59,13 +60,17 @@ def make_target(tmp_path, exe, map_path, kind="pe"):
     )
 
 
+def symbol(class_name, method_name):
+    return SourceSymbol(class_name, method_name, "sample.cpp", 1)
+
+
 DEFAULT_FUNCTION_SYMBOLS = {
-    ORIG_ALPHA: [{"class_name": "Sample", "method_name": "Alpha"}],
-    ORIG_BETA: [{"class_name": "Sample", "method_name": "Beta"}],
-    ORIG_GAMMA: [{"class_name": "Sample", "method_name": "Gamma"}],
+    ORIG_ALPHA: [symbol("Sample", "Alpha")],
+    ORIG_BETA: [symbol("Sample", "Beta")],
+    ORIG_GAMMA: [symbol("Sample", "Gamma")],
 }
 
-CLASSES = {"Sample": {"vtable_addr": 0x00460000}}
+CLASSES = {"Sample": ClassInfo(vtable_addr=0x00460000)}
 
 
 def run(tmp_path, rebuilt_slots, rebuilt_map, original_entries, kind="pe"):
@@ -148,9 +153,9 @@ def test_missing_override_with_same_method_name_is_reported(tmp_path):
     The method names are identical, so only the address distinguishes them.
     """
     function_symbols = {
-        ORIG_ALPHA: [{"class_name": "Derived", "method_name": "Alpha"}],
-        ORIG_BETA: [{"class_name": "Derived", "method_name": "Update"}],
-        ORIG_GAMMA: [{"class_name": "Base", "method_name": "Update"}],
+        ORIG_ALPHA: [symbol("Derived", "Alpha")],
+        ORIG_BETA: [symbol("Derived", "Update")],
+        ORIG_GAMMA: [symbol("Base", "Update")],
     }
     exe = write_rebuilt(tmp_path, [ALPHA, GAMMA])
     map_path = write_map(
