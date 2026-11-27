@@ -1,7 +1,8 @@
 """Backward dataflow over a straight-line instruction window.
 
 Register aliases, affine register values, stack-argument origins and the
-other facts the suppressors ask about one instruction's inputs."""
+other facts the suppressors ask about one instruction's inputs.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from binary_comp.analyzers.values.operands import (
     memory_operands,
     writes_register,
 )
+from binary_comp.analyzers.values.stream import InstructionStream, instruction_positions
 
 
 def nearby_memory_displacements(
@@ -216,165 +218,202 @@ def affine_add(
     return coefficients, left[1] + right[1] * scale
 
 
+AffineValue = tuple[dict[str, int], int]
+StackKey = tuple[tuple[tuple[str, int], ...], int]
+AFFINE_REGISTERS = ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp")
+
+
+def affine_entry_registers() -> dict[str, AffineValue]:
+    return {name: ({name: 1}, 0) for name in AFFINE_REGISTERS}
+
+
+def affine_stack_address(operand: Operand, registers: dict[str, AffineValue]) -> StackKey | None:
+    address = affine_memory_address(operand, registers)
+    if address is None:
+        return None
+    coefficients, _constant = address
+    if coefficients != (("esp", 1),):
+        return None
+    return address
+
+
+def affine_step(
+    instr: Instruction,
+    registers: dict[str, AffineValue],
+    stack_values: dict[StackKey, AffineValue],
+) -> None:
+    """Apply one instruction to the affine register and stack-slot state.
+
+    Every update replaces a register's value with a new tuple and never
+    mutates one in place, so a shallow copy of ``registers`` is a snapshot.
+    """
+    def stack_address(operand: Operand):
+        return affine_stack_address(operand, registers)
+
+    operands = instr.operands
+    if instr.mnemonic == "call":
+        for name in ("eax", "ecx", "edx"):
+            registers[name] = ({name: 1}, 0)
+        return
+    if instr.mnemonic == "push":
+        registers["esp"] = (
+            dict(registers["esp"][0]),
+            registers["esp"][1] - 4,
+        )
+        return
+    if instr.mnemonic == "pop":
+        if operands and operands[0].kind == "reg":
+            dst = full_register_name(operands[0].reg)
+            registers[dst] = ({dst: 1}, 0)
+        registers["esp"] = (
+            dict(registers["esp"][0]),
+            registers["esp"][1] + 4,
+        )
+        return
+    if instr.mnemonic == "leave":
+        registers["esp"] = (
+            dict(registers["ebp"][0]),
+            registers["ebp"][1] + 4,
+        )
+        registers["ebp"] = ({"ebp": 1}, 0)
+        return
+    if not operands:
+        return
+
+    if instr.mnemonic == "mov" and len(operands) >= 2 and operands[0].kind == "mem":
+        destination = stack_address(operands[0])
+        if destination is not None:
+            src = operands[1]
+            if src.kind == "reg":
+                value = registers.get(full_register_name(src.reg))
+                if value is not None:
+                    stack_values[destination] = (dict(value[0]), value[1])
+                else:
+                    stack_values.pop(destination, None)
+            elif src.kind == "imm":
+                stack_values[destination] = ({}, src.imm)
+            else:
+                stack_values.pop(destination, None)
+        return
+
+    if operands[0].kind != "reg":
+        return
+
+    dst = full_register_name(operands[0].reg)
+    if dst not in registers:
+        return
+    if instr.mnemonic == "mov" and len(operands) >= 2:
+        source = operands[1]
+        if source.kind == "reg":
+            src = full_register_name(source.reg)
+            if src not in registers:
+                registers[dst] = ({dst: 1}, 0)
+                return
+            registers[dst] = (dict(registers[src][0]), registers[src][1])
+            return
+        if source.kind == "imm":
+            registers[dst] = ({}, source.imm)
+            return
+        if source.kind == "mem":
+            source_address = stack_address(source)
+            if source_address is None:
+                registers[dst] = ({dst: 1}, 0)
+                return
+            stored = stack_values.get(source_address)
+            if stored is not None:
+                registers[dst] = (dict(stored[0]), stored[1])
+                return
+            token = f"stack-value:{source_address!r}"
+            registers[dst] = ({token: 1}, 0)
+            return
+    if instr.mnemonic == "lea" and len(operands) >= 2 and operands[1].kind == "mem":
+        src = operands[1]
+        value: tuple[dict[str, int], int] = ({}, src.disp)
+        if src.base:
+            base = full_register_name(src.base)
+            if base not in registers:
+                registers[dst] = ({dst: 1}, 0)
+                return
+            value = affine_add(value, registers[base])
+        if src.index:
+            index = full_register_name(src.index)
+            if index not in registers:
+                registers[dst] = ({dst: 1}, 0)
+                return
+            value = affine_add(
+                value,
+                registers[index],
+                src.scale,
+            )
+        registers[dst] = value
+        return
+    if instr.mnemonic in {"add", "sub"} and len(operands) >= 2 and operands[1].kind == "imm":
+        delta = operands[1].imm if instr.mnemonic == "add" else -operands[1].imm
+        registers[dst] = (dict(registers[dst][0]), registers[dst][1] + delta)
+        return
+    if instr.mnemonic in {"add", "sub"} and len(operands) >= 2 and operands[1].kind == "reg":
+        src = full_register_name(operands[1].reg)
+        if src not in registers:
+            registers[dst] = ({dst: 1}, 0)
+            return
+        scale = 1 if instr.mnemonic == "add" else -1
+        registers[dst] = affine_add(registers[dst], registers[src], scale)
+        return
+    if instr.mnemonic in {"inc", "dec"}:
+        delta = 1 if instr.mnemonic == "inc" else -1
+        registers[dst] = (dict(registers[dst][0]), registers[dst][1] + delta)
+        return
+    if (
+        instr.mnemonic == "shl"
+        and len(operands) >= 2
+        and operands[1].kind == "imm"
+        and 0 <= operands[1].imm < 8
+    ):
+        scale = 1 << operands[1].imm
+        registers[dst] = (
+            {name: coefficient * scale for name, coefficient in registers[dst][0].items()},
+            registers[dst][1] * scale,
+        )
+        return
+    if (
+        instr.mnemonic == "xor"
+        and len(operands) >= 2
+        and operands[1].kind == "reg"
+        and full_register_name(operands[1].reg) == dst
+    ):
+        registers[dst] = ({}, 0)
+        return
+
+    registers[dst] = ({dst: 1}, 0)
+
+
 def affine_registers_at(
     instrs: list[Instruction],
     idx: int,
-) -> dict[str, tuple[dict[str, int], int]]:
-    registers = {
-        name: ({name: 1}, 0)
-        for name in ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp")
-    }
-    stack_values: dict[
-        tuple[tuple[tuple[str, int], ...], int],
-        tuple[dict[str, int], int],
-    ] = {}
+) -> dict[str, AffineValue]:
+    """Affine value of each general register just before ``instrs[idx]``.
 
-    def stack_address(operand: Operand):
-        address = affine_memory_address(operand, registers)
-        if address is None:
-            return None
-        coefficients, _constant = address
-        if coefficients != (("esp", 1),):
-            return None
-        return address
+    Each value is linear in the registers' values at function entry.  For an
+    ``InstructionStream`` the states are replayed once and kept, so asking
+    about every instruction of a function costs one pass, not one per index.
+    """
+    if not isinstance(instrs, InstructionStream) or not 0 <= idx <= len(instrs):
+        registers = affine_entry_registers()
+        stack_values: dict[StackKey, AffineValue] = {}
+        for instr in instrs[:idx]:
+            affine_step(instr, registers, stack_values)
+        return registers
 
-    for instr in instrs[:idx]:
-        operands = instr.operands
-        if instr.mnemonic == "call":
-            for name in ("eax", "ecx", "edx"):
-                registers[name] = ({name: 1}, 0)
-            continue
-        if instr.mnemonic == "push":
-            registers["esp"] = (
-                dict(registers["esp"][0]),
-                registers["esp"][1] - 4,
-            )
-            continue
-        if instr.mnemonic == "pop":
-            if operands and operands[0].kind == "reg":
-                dst = full_register_name(operands[0].reg)
-                registers[dst] = ({dst: 1}, 0)
-            registers["esp"] = (
-                dict(registers["esp"][0]),
-                registers["esp"][1] + 4,
-            )
-            continue
-        if instr.mnemonic == "leave":
-            registers["esp"] = (
-                dict(registers["ebp"][0]),
-                registers["ebp"][1] + 4,
-            )
-            registers["ebp"] = ({"ebp": 1}, 0)
-            continue
-        if not operands:
-            continue
-
-        if instr.mnemonic == "mov" and len(operands) >= 2 and operands[0].kind == "mem":
-            destination = stack_address(operands[0])
-            if destination is not None:
-                src = operands[1]
-                if src.kind == "reg":
-                    value = registers.get(full_register_name(src.reg))
-                    if value is not None:
-                        stack_values[destination] = (dict(value[0]), value[1])
-                    else:
-                        stack_values.pop(destination, None)
-                elif src.kind == "imm":
-                    stack_values[destination] = ({}, src.imm)
-                else:
-                    stack_values.pop(destination, None)
-            continue
-
-        if operands[0].kind != "reg":
-            continue
-
-        dst = full_register_name(operands[0].reg)
-        if dst not in registers:
-            continue
-        if instr.mnemonic == "mov" and len(operands) >= 2:
-            source = operands[1]
-            if source.kind == "reg":
-                src = full_register_name(source.reg)
-                if src not in registers:
-                    registers[dst] = ({dst: 1}, 0)
-                    continue
-                registers[dst] = (dict(registers[src][0]), registers[src][1])
-                continue
-            if source.kind == "imm":
-                registers[dst] = ({}, source.imm)
-                continue
-            if source.kind == "mem":
-                source_address = stack_address(source)
-                if source_address is None:
-                    registers[dst] = ({dst: 1}, 0)
-                    continue
-                stored = stack_values.get(source_address)
-                if stored is not None:
-                    registers[dst] = (dict(stored[0]), stored[1])
-                    continue
-                token = f"stack-value:{source_address!r}"
-                registers[dst] = ({token: 1}, 0)
-                continue
-        if instr.mnemonic == "lea" and len(operands) >= 2 and operands[1].kind == "mem":
-            src = operands[1]
-            value: tuple[dict[str, int], int] = ({}, src.disp)
-            if src.base:
-                base = full_register_name(src.base)
-                if base not in registers:
-                    registers[dst] = ({dst: 1}, 0)
-                    continue
-                value = affine_add(value, registers[base])
-            if src.index:
-                index = full_register_name(src.index)
-                if index not in registers:
-                    registers[dst] = ({dst: 1}, 0)
-                    continue
-                value = affine_add(
-                    value,
-                    registers[index],
-                    src.scale,
-                )
-            registers[dst] = value
-            continue
-        if instr.mnemonic in {"add", "sub"} and len(operands) >= 2 and operands[1].kind == "imm":
-            delta = operands[1].imm if instr.mnemonic == "add" else -operands[1].imm
-            registers[dst] = (dict(registers[dst][0]), registers[dst][1] + delta)
-            continue
-        if instr.mnemonic in {"add", "sub"} and len(operands) >= 2 and operands[1].kind == "reg":
-            src = full_register_name(operands[1].reg)
-            if src not in registers:
-                registers[dst] = ({dst: 1}, 0)
-                continue
-            scale = 1 if instr.mnemonic == "add" else -1
-            registers[dst] = affine_add(registers[dst], registers[src], scale)
-            continue
-        if instr.mnemonic in {"inc", "dec"}:
-            delta = 1 if instr.mnemonic == "inc" else -1
-            registers[dst] = (dict(registers[dst][0]), registers[dst][1] + delta)
-            continue
-        if (
-            instr.mnemonic == "shl"
-            and len(operands) >= 2
-            and operands[1].kind == "imm"
-            and 0 <= operands[1].imm < 8
-        ):
-            scale = 1 << operands[1].imm
-            registers[dst] = (
-                {name: coefficient * scale for name, coefficient in registers[dst][0].items()},
-                registers[dst][1] * scale,
-            )
-            continue
-        if (
-            instr.mnemonic == "xor"
-            and len(operands) >= 2
-            and operands[1].kind == "reg"
-            and full_register_name(operands[1].reg) == dst
-        ):
-            registers[dst] = ({}, 0)
-            continue
-
-        registers[dst] = ({dst: 1}, 0)
-    return registers
+    states = instrs.affine_states
+    if not states:
+        states.append((affine_entry_registers(), {}))
+    while len(states) <= idx:
+        registers, stack_values = states[-1]
+        registers = dict(registers)
+        stack_values = dict(stack_values)
+        affine_step(instrs[len(states) - 1], registers, stack_values)
+        states.append((registers, stack_values))
+    return dict(states[idx][0])
 
 
 def affine_memory_address(
@@ -671,7 +710,7 @@ def stack_argument_origin_at(
         return None
 
     target_register = full_register_name(register)
-    by_addr = {instr.address: pos for pos, instr in enumerate(instrs)}
+    by_addr = instruction_positions(instrs)
     # position, ESP delta from function entry, EBP frame delta, origins
     initial = (0, 0, None, ())
     worklist = [initial]

@@ -18,6 +18,7 @@ from binary_comp.analyzers.values.operands import (
     immediate_string,
     normalize_string_for_compare,
 )
+from binary_comp.analyzers.values.stream import direct_branch_targets, instruction_positions
 
 
 def call_signature(instr: Instruction, direct_targets: dict[int, str] | None = None) -> tuple | None:
@@ -41,7 +42,7 @@ def following_call_signature(
     max_steps: int = 48,
     direct_targets: dict[int, str] | None = None,
 ) -> tuple | None:
-    by_addr = {instr.address: pos for pos, instr in enumerate(instrs)}
+    by_addr = instruction_positions(instrs)
     seen: set[int] = set()
     pos = idx + 1
     steps = 0
@@ -86,7 +87,7 @@ def following_call_context(
     if idx < 0 or idx >= len(instrs) or instrs[idx].mnemonic != "push":
         return None
 
-    by_addr = {instr.address: pos for pos, instr in enumerate(instrs)}
+    by_addr = instruction_positions(instrs)
     seen: set[int] = set()
     pos = idx + 1
     steps = 0
@@ -166,14 +167,7 @@ def block_literal_anchors(
     control-flow boundaries prevent unrelated switch cases from lending each
     other anchors.
     """
-    branch_targets = {
-        unsigned32(instr.operands[0].imm)
-        for instr in instrs
-        if is_branch_or_call(instr.mnemonic)
-        and instr.mnemonic != "call"
-        and instr.operands
-        and instr.operands[0].kind == "imm"
-    }
+    branch_targets = direct_branch_targets(instrs)
 
     lo = idx
     steps = 0
@@ -233,15 +227,8 @@ def push_argument_fingerprint(
     if idx < 0 or idx >= len(instrs) or instrs[idx].mnemonic != "push":
         return ()
 
-    by_addr = {instr.address: pos for pos, instr in enumerate(instrs)}
-    branch_targets = {
-        unsigned32(instr.operands[0].imm)
-        for instr in instrs
-        if is_branch_or_call(instr.mnemonic)
-        and instr.mnemonic != "call"
-        and instr.operands
-        and instr.operands[0].kind == "imm"
-    }
+    by_addr = instruction_positions(instrs)
+    branch_targets = direct_branch_targets(instrs)
 
     lo = idx
     while lo > 0:

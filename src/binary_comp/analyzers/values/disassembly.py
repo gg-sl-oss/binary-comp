@@ -17,6 +17,7 @@ from binary_comp.core.ghidra import function_starts_from_export_dir
 from binary_comp.core.pe import PEImage
 from binary_comp.policy import VerifierPolicy
 from binary_comp.source.functions import FunctionGroup
+from binary_comp.analyzers.values.stream import InstructionStream
 
 
 def load_boundary_file(path: str | None) -> set[int]:
@@ -99,7 +100,7 @@ def leading_successor_switch_table_start(
     return min((lo for lo, _ in ranges), default=None)
 
 
-def disassemble(image: PEImage, start: int, starts: list[int], policy: VerifierPolicy) -> list[Instruction]:
+def disassemble(image: PEImage, start: int, starts: list[int], policy: VerifierPolicy) -> InstructionStream:
     boundaries = set(starts)
     leading_table = leading_successor_switch_table_start(image, start, boundaries, policy)
     if leading_table is not None:
@@ -115,9 +116,9 @@ def disassemble(image: PEImage, start: int, starts: list[int], policy: VerifierP
         instructions = trim_leading_stack_probe(instructions)
         fragment = contiguous_tail_fragment_start(instructions, boundaries)
         if fragment is None:
-            return instructions
+            break
         boundaries.remove(fragment)
-    return instructions
+    return InstructionStream(instructions)
 
 
 def contiguous_tail_fragment_start(
