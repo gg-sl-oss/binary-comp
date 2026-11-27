@@ -88,6 +88,29 @@ class ParentVtableCandidate:
 
 
 @dataclass(frozen=True)
+class HeaderMetadata:
+    """What the class declarations in the headers say."""
+
+    hierarchy: dict[str, str]
+    class_header: dict[str, str]
+    class_methods: dict[str, list[dict[str, Any]]]
+    explicit_vtables: dict[str, int]
+    constructors: dict[str, int]
+    # Every ``vtable 0x...`` address noted in any header comment, not only the
+    # comments attached to a class.
+    comment_vtable_addrs: frozenset[int]
+
+
+@dataclass(frozen=True)
+class VtableSources:
+    """Everything the check reads from the source tree, parsed once."""
+
+    headers: HeaderMetadata
+    function_symbols: dict[int, list[dict[str, Any]]]
+    implementations: dict[int, list[tuple[str, int]]]
+
+
+@dataclass(frozen=True)
 class ClassReport:
     name: str
     vtable_addr: int
@@ -420,8 +443,11 @@ def iter_class_nodes(tree):
             yield node, name_node, body_node
 
 
-def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None):
-    vtable_pat = re.compile(r"\bvtable(?:\s+address)?(?:\s+at)?[:\s]+0x([0-9a-fA-F]+)", re.IGNORECASE)
+VTABLE_COMMENT_PATTERN = re.compile(r"\bvtable(?:\s+address)?(?:\s+at)?[:\s]+0x([0-9a-fA-F]+)", re.IGNORECASE)
+
+
+def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None) -> HeaderMetadata:
+    vtable_pat = VTABLE_COMMENT_PATTERN
     ctor_pat = re.compile(r"Constructor(?:\s+at)?[:\s]+(?:FUN_)?0x([0-9a-fA-F]+)", re.IGNORECASE)
 
     hierarchy: dict[str, str] = {}
@@ -429,10 +455,16 @@ def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None):
     class_methods: dict[str, list[dict[str, Any]]] = {}
     explicit_vtables: dict[str, int] = {}
     constructors: dict[str, int] = {}
+    comment_vtable_addrs: set[int] = set()
 
     for hfile in sorted(iter_source_files(source_dirs, (".h",), map_skip=map_skip)):
         basename = os.path.basename(hfile)
         source, tree = parse_source_tree(hfile)
+
+        for node in walk(tree.root_node):
+            if node.type == "comment":
+                for match in vtable_pat.finditer(node_text(source, node)):
+                    comment_vtable_addrs.add(int(match.group(1), 16))
 
         for class_node, name_node, body_node in iter_class_nodes(tree):
             class_name = node_text(source, name_node).strip()
@@ -461,22 +493,14 @@ def parse_header_metadata(source_dirs: tuple[str, ...], map_skip: str | None):
                 if parsed:
                     class_methods[class_name].append(parsed)
 
-    return hierarchy, class_header, class_methods, explicit_vtables, constructors
-
-
-def find_vtable_addrs_from_headers(source_dirs: tuple[str, ...], map_skip: str | None, rdata_min: int, rdata_max: int) -> set[int]:
-    pattern = re.compile(r"\bvtable(?:\s+address)?(?:\s+at)?[:\s]+0x([0-9a-fA-F]+)", re.IGNORECASE)
-    addrs = set()
-    for hfile in iter_source_files(source_dirs, (".h",), map_skip=map_skip):
-        source, tree = parse_source_tree(hfile)
-        for node in walk(tree.root_node):
-            if node.type != "comment":
-                continue
-            for match in pattern.finditer(node_text(source, node)):
-                addr = int(match.group(1), 16)
-                if rdata_min <= addr < rdata_max:
-                    addrs.add(addr)
-    return addrs
+    return HeaderMetadata(
+        hierarchy=hierarchy,
+        class_header=class_header,
+        class_methods=class_methods,
+        explicit_vtables=explicit_vtables,
+        constructors=constructors,
+        comment_vtable_addrs=frozenset(comment_vtable_addrs),
+    )
 
 
 def split_symbol(name: str) -> tuple[str | None, str]:
@@ -527,6 +551,14 @@ def find_implemented_functions(source_dirs: tuple[str, ...], map_skip: str | Non
             addr = int(marker.address, 16)
             implementations.setdefault(addr, []).append((basename, marker.line))
     return implementations
+
+
+def load_vtable_sources(target: ProjectTarget) -> VtableSources:
+    return VtableSources(
+        headers=parse_header_metadata(target.source_dirs, target.map_skip),
+        function_symbols=find_source_function_symbols(target.source_dirs, target.map_skip),
+        implementations=find_implemented_functions(target.source_dirs, target.map_skip),
+    )
 
 
 def first_not_none(*values: int | None) -> int | None:
@@ -716,7 +748,7 @@ def write_mentions_class_or_descendant(write: VtableWriteEvidence, class_name: s
 
 
 def find_parent_vtable_candidates(
-    target: ProjectTarget,
+    sources: VtableSources,
     image: PEImage,
     starts: list[int],
     classes: dict[str, dict[str, Any]],
@@ -731,8 +763,9 @@ def find_parent_vtable_candidates(
     if not parent_refs:
         return ()
 
-    hierarchy, _, class_methods, _, _ = parse_header_metadata(target.source_dirs, target.map_skip)
-    function_symbols = find_source_function_symbols(target.source_dirs, target.map_skip)
+    hierarchy = sources.headers.hierarchy
+    class_methods = sources.headers.class_methods
+    function_symbols = sources.function_symbols
     writes_by_vtable = collect_vtable_writes(
         image,
         starts,
@@ -782,7 +815,7 @@ def find_parent_vtable_candidates(
 
 
 def parse_class_info(
-    target: ProjectTarget,
+    sources: VtableSources,
     image: PEImage,
     starts: list[int],
     rdata_min: int,
@@ -790,10 +823,13 @@ def parse_class_info(
     policy: VtablePolicy,
 ) -> tuple[dict[str, dict[str, Any]], frozenset[str]]:
     classes: dict[str, dict[str, Any]] = {}
-    hierarchy, class_header, _, explicit_vtables, constructors = parse_header_metadata(target.source_dirs, target.map_skip)
+    headers = sources.headers
+    hierarchy = headers.hierarchy
+    class_header = headers.class_header
+    explicit_vtables = headers.explicit_vtables
+    constructors = headers.constructors
     known_class_names = set(class_header)
-    symbols = find_source_function_symbols(target.source_dirs, target.map_skip)
-    ctor_symbols = constructor_symbols(symbols)
+    ctor_symbols = constructor_symbols(sources.function_symbols)
     ctor_by_class = {
         info["class_name"]: addr
         for addr, info in ctor_symbols.items()
@@ -1094,7 +1130,7 @@ def is_trivial_function_type(ftype: str) -> bool:
 
 
 def build_class_reports(
-    target: ProjectTarget,
+    sources: VtableSources,
     image: PEImage,
     classes: dict[str, dict[str, Any]],
     all_vtable_addrs: tuple[int, ...],
@@ -1104,9 +1140,9 @@ def build_class_reports(
     options: VtableOptions,
     policy: VtablePolicy,
 ) -> tuple[tuple[ClassReport, ...], dict[str, int], tuple[int, ...]]:
-    implementations = find_implemented_functions(target.source_dirs, target.map_skip)
-    function_symbols = find_source_function_symbols(target.source_dirs, target.map_skip)
-    _, _, class_methods, _, _ = parse_header_metadata(target.source_dirs, target.map_skip)
+    implementations = sources.implementations
+    function_symbols = sources.function_symbols
+    class_methods = sources.headers.class_methods
 
     expected_slots: dict[str, list[dict[str, Any] | None]] = {}
     for class_name in classes:
@@ -1347,11 +1383,12 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
     if not starts:
         raise RuntimeError(f"no function boundary markers found in {target.code_dir}")
 
+    sources = load_vtable_sources(target)
     capstone_addrs = find_vtable_addrs_from_capstone(image, starts, code_start, code_end, rdata_min, rdata_max, policy)
-    header_addrs = find_vtable_addrs_from_headers(target.source_dirs, target.map_skip, rdata_min, rdata_max)
+    header_addrs = {addr for addr in sources.headers.comment_vtable_addrs if rdata_min <= addr < rdata_max}
     all_vtable_addrs = tuple(sorted(capstone_addrs | header_addrs))
 
-    classes, known_class_names = parse_class_info(target, image, starts, rdata_min, rdata_max, policy)
+    classes, known_class_names = parse_class_info(sources, image, starts, rdata_min, rdata_max, policy)
     invalid_parents = tuple(sorted(
         (class_name, info["parent"])
         for class_name, info in classes.items()
@@ -1372,7 +1409,7 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
         options.filter_class,
     )
     parent_vtable_candidates = find_parent_vtable_candidates(
-        target,
+        sources,
         image,
         starts,
         classes,
@@ -1385,7 +1422,7 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
         policy,
     )
     reports, totals, unmatched = build_class_reports(
-        target,
+        sources,
         image,
         classes,
         all_vtable_addrs,
@@ -1402,7 +1439,7 @@ def check_vtables(config: dict[str, Any], target: ProjectTarget, options: Vtable
             target,
             classes,
             read_class_vtables(image, classes, all_vtable_addrs, code_start, code_end),
-            find_source_function_symbols(target.source_dirs, target.map_skip),
+            sources.function_symbols,
             skip_classes=policy.skip_classes,
             filter_class=options.filter_class,
         )

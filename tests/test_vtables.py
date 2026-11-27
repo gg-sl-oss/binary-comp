@@ -184,7 +184,7 @@ public:
         encoding="utf-8",
     )
 
-    _, _, _, explicit_vtables, _ = parse_header_metadata((str(src),), None)
+    explicit_vtables = parse_header_metadata((str(src),), None).explicit_vtables
 
     assert explicit_vtables["Trailing"] == DATA_VA
 
@@ -202,7 +202,7 @@ public:
         encoding="utf-8",
     )
 
-    _, _, _, explicit_vtables, _ = parse_header_metadata((str(src),), None)
+    explicit_vtables = parse_header_metadata((str(src),), None).explicit_vtables
 
     assert explicit_vtables["Opening"] == DATA_VA
 
@@ -226,7 +226,8 @@ public:
         encoding="utf-8",
     )
 
-    _, _, _, explicit_vtables, constructors = parse_header_metadata((str(src),), None)
+    headers = parse_header_metadata((str(src),), None)
+    explicit_vtables, constructors = headers.explicit_vtables, headers.constructors
 
     assert explicit_vtables["First"] == DATA_VA
     assert constructors["First"] == TEXT_VA
