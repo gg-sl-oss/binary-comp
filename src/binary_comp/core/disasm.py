@@ -753,7 +753,7 @@ def merge_ranges(ranges: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ..
 def has_msvc_seh_frame(instrs: list[Instruction]) -> bool:
     """MSVC places EH cleanup funclets after the main body RET."""
     scan = instrs[:12]
-    saw_fs_read = any(_fs_mov_side(instr) == "read" for instr in scan)
+    saw_fs_read = any(_fs_access(instr) == "read" for instr in scan)
     saw_sentinel = any(
         instr.mnemonic == "push"
         and instr.operands
@@ -761,12 +761,19 @@ def has_msvc_seh_frame(instrs: list[Instruction]) -> bool:
         and instr.operands[0].imm == -1
         for instr in scan
     )
-    saw_fs_write = any(_fs_mov_side(instr) == "write" for instr in instrs[:24])
+    saw_fs_write = any(_fs_access(instr) == "write" for instr in instrs[:24])
     return saw_fs_read and saw_sentinel and saw_fs_write
 
 
-def _fs_mov_side(instr: Instruction) -> str | None:
-    """Return "read" for ``mov reg, fs:[..]``, "write" for ``mov fs:[..], reg``."""
+def _fs_access(instr: Instruction) -> str | None:
+    """Whether ``instr`` reads or writes through ``fs:``, else None.
+
+    A frame links in the previous handler by reading ``fs:[0]``, either into
+    a register (``mov eax, fs:[0]``) or straight onto the stack (``push
+    dword ptr fs:[0]``), then installs itself with ``mov fs:[0], esp``.
+    """
+    if instr.mnemonic == "push":
+        return "read" if "fs:" in instr.op_str.lower() else None
     if instr.mnemonic != "mov":
         return None
     dest, _, source = instr.op_str.lower().partition(",")
