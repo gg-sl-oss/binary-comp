@@ -11,6 +11,7 @@ from binary_comp.analyzers.values.operands import (
     member_displacement,
     mnemonic_sequence_similarity,
 )
+from binary_comp.analyzers.values.stream import instruction_positions
 
 
 def following_flag_branch_mnemonic(
@@ -59,7 +60,7 @@ def branch_successor_mnemonics(
     if branch_idx < 0 or branch_idx >= len(instrs):
         return []
     branch = instrs[branch_idx]
-    by_addr = {instr.address: pos for pos, instr in enumerate(instrs)}
+    by_addr = instruction_positions(instrs)
     if taken:
         if not branch.operands or branch.operands[0].kind != "imm":
             return []
@@ -101,7 +102,7 @@ def branch_successor_effects(
     if branch_idx < 0 or branch_idx >= len(instrs):
         return []
     branch = instrs[branch_idx]
-    by_addr = {instr.address: pos for pos, instr in enumerate(instrs)}
+    by_addr = instruction_positions(instrs)
     if taken:
         if not branch.operands or branch.operands[0].kind != "imm":
             return []
