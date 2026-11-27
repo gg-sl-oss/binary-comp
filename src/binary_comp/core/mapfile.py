@@ -61,11 +61,21 @@ def _read_msvc_map(map_path: str) -> tuple[_MapLine, ...]:
         stat = os.stat(map_path)
     except OSError:
         return ()
-    return _read_msvc_map_cached(map_path, stat.st_mtime_ns, stat.st_size)
+    # ctime changes on every write even where mtime is coarse or was set back.
+    return _read_msvc_map_cached(map_path, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+
+
+def clear_map_cache() -> None:
+    """Forget every cached map parse, for example after a rebuild.
+
+    On filesystems with coarse timestamps a relinked map can keep its size
+    and times, so the file check alone would return the old parse.
+    """
+    _read_msvc_map_cached.cache_clear()
 
 
 @lru_cache(maxsize=8)
-def _read_msvc_map_cached(map_path: str, _mtime_ns: int, _size: int) -> tuple[_MapLine, ...]:
+def _read_msvc_map_cached(map_path: str, _mtime_ns: int, _ctime_ns: int, _size: int) -> tuple[_MapLine, ...]:
     lines: list[_MapLine] = []
     with open(map_path, "r", encoding="latin1", errors="ignore") as f:
         for line in f:

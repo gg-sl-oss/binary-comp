@@ -60,3 +60,23 @@ def test_failed_build_names_the_command_and_exit_code(tmp_path):
 def test_unbalanced_quotes_are_a_build_error():
     with pytest.raises(BuildError, match="cannot parse build command"):
         maybe_build(target_with(BuildConfig(build="make 'oops")), True)
+
+
+@pytest.mark.parametrize("exit_code", [0, 5])
+def test_build_forgets_cached_map_parses(tmp_path, exit_code):
+    from binary_comp.core.mapfile import _read_msvc_map_cached, parse_msvc_map_symbols
+
+    map_path = tmp_path / "rebuilt.map"
+    map_path.write_text(" 0001:00000000       _main   00401000 f   main.obj\n", encoding="latin1")
+    parse_msvc_map_symbols(str(map_path))
+    assert _read_msvc_map_cached.cache_info().currsize > 0
+
+    target = target_with(BuildConfig(build=recorder(tmp_path / "log.json", exit_code=exit_code)))
+    if exit_code:
+        with pytest.raises(BuildError):
+            maybe_build(target, True)
+    else:
+        maybe_build(target, True)
+
+    # Even a failed build may have rewritten maps that were already read.
+    assert _read_msvc_map_cached.cache_info().currsize == 0
