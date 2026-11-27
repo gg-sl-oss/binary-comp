@@ -17,9 +17,42 @@ from functools import cached_property
 from binary_comp.core.disasm import Instruction, is_branch_or_call, unsigned32
 
 
+_CACHED_INDEXES = ("positions", "branch_targets", "affine_states")
+
+
+def _invalidating(name: str):
+    method = getattr(list, name)
+
+    def wrapper(self, *args, **kwargs):
+        result = method(self, *args, **kwargs)
+        self._drop_cached_indexes()
+        return self if result is self else result
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = method.__doc__
+    return wrapper
+
+
 class InstructionStream(list):
-    """A disassembled function.  Do not modify it after construction: the
-    cached indexes would no longer describe it."""
+    """A disassembled function.
+
+    Changing the stream in place drops the cached indexes, so they are
+    rebuilt on the next query.  Copies and unpickled streams start with no
+    cached indexes rather than sharing them.
+    """
+
+    def _drop_cached_indexes(self) -> None:
+        for name in _CACHED_INDEXES:
+            self.__dict__.pop(name, None)
+
+    def __copy__(self) -> InstructionStream:
+        return InstructionStream(self)
+
+    def copy(self) -> InstructionStream:
+        return InstructionStream(self)
+
+    def __reduce__(self):
+        return (InstructionStream, (list(self),))
 
     @cached_property
     def positions(self) -> dict[int, int]:
@@ -34,6 +67,14 @@ class InstructionStream(list):
         """Register states before each instruction, filled in on demand by
         ``dataflow.affine_registers_at``."""
         return []
+
+
+for _name in (
+    "__setitem__", "__delitem__", "__iadd__", "__imul__",
+    "append", "extend", "insert", "remove", "pop", "clear", "sort", "reverse",
+):
+    setattr(InstructionStream, _name, _invalidating(_name))
+del _name
 
 
 def build_positions(instrs: list[Instruction]) -> dict[int, int]:

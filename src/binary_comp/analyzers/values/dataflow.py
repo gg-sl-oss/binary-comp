@@ -413,7 +413,9 @@ def affine_registers_at(
         stack_values = dict(stack_values)
         affine_step(instrs[len(states) - 1], registers, stack_values)
         states.append((registers, stack_values))
-    return dict(states[idx][0])
+    # Copy each coefficient dict too: the cached states share them with one
+    # another, so a caller editing one in place would corrupt later queries.
+    return {name: (dict(coeffs), const) for name, (coeffs, const) in states[idx][0].items()}
 
 
 def affine_memory_address(
